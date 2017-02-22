@@ -1,0 +1,88 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: #000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.green { border-color: #0f0; }
+.red { border-color: #f00; }
+.yellow { border-color: #ff0; }
+.blue { border-color: #00f; }
+
+.container {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100vh;
+  height: 100vh;
+  position: relative;
+}
+
+.quad {
+  display: flex;
+  width: 50%;
+  height: 50%;
+  justify-content: center;
+  align-items: center;
+}
+
+.btn {
+  width: 50%;
+  height: 50%;
+  border-radius: 50%;
+  border-width: 4px;
+  border-style: solid;
+  background-color: #000;
+  cursor: pointer;
+}
+
+.ctrl {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-around;
+  border-color: #fff;
+  position: absolute;
+  top: 32%;
+  left: 32%;
+  width: 35%;
+  height: 35%;
+}
+
+.ctrl-char {
+  font-size: 3em;
+  font-family: monospace;
+  color: #fff;
+}
+
+.btn-row {
+  display: flex;
+  width: 45%;
+  justify-content: space-around;
+  align-items: center;
+}
+
+.ctrl-btn {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  color: #fff;
+  background: #000;
+  border: 3px solid #fff;
+  padding: 10px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.ctrl-btn-on {
+  color: #000;
+  background: #fff;
+}
+
+.message {
+  color: #fff;
+}
