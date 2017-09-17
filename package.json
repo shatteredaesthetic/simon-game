@@ -1,7 +1,7 @@
 {
   "name": "simon_choo",
   "version": "1.0.0",
-  "description": "",
+  "description": "Simon game using choo and web-audio-daw",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -15,7 +15,7 @@
     ]
   },
   "keywords": [],
-  "author": "",
+  "author": "Jason Polhemus <shatteredaesthetic@gmail.com>",
   "license": "ISC",
   "dependencies": {
     "choo": "^4.1.0",
