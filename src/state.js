@@ -1,4 +1,4 @@
-import { player, status, newSeq, getQuads, randomPraise, keyFrames } from './utils';
+import { player, status, newSeq, getQuads, randomPraise, keyFrames } from './utils'
 
 const reset = {
   sequence: [],
@@ -106,6 +106,6 @@ export default function gameStore(state, emitter) {
 
   function playSelect({ el, note, color }) {
     player.play(note)
-    setTimeout(() => { el.animate(keyFrames(color), { duration: 500 }); }, note.wait * 1000)
+    setTimeout(() => { el.animate(keyFrames(color), { duration: 500 }) }, note.wait * 1000)
   }
 }
