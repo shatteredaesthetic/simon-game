@@ -1,13 +1,8 @@
-import choo from 'choo';
-import model from './model';
-import view from './view';
-const app = choo();
+import choo from 'choo'
+import gameStore from './state'
+import view from './view'
 
-app.model(model);
-
-app.router([
-  ['/', view]
-]);
-
-const tree = app.start();
-document.body.appendChild(tree);
+const app = choo()
+app.use(gameStore)
+app.route('/', view)
+app.mount('body')

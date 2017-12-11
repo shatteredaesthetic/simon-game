@@ -492,357 +492,48 @@ var objectKeys = Object.keys || function (obj) {
 };
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"util/":26}],2:[function(require,module,exports){
-module.exports = applyHook
-
-// apply arguments onto an array of functions, useful for hooks
-// (arr, any?, any?, any?, any?, any?) -> null
-function applyHook (arr, arg1, arg2, arg3, arg4, arg5) {
-  arr.forEach(function (fn) {
-    fn(arg1, arg2, arg3, arg4, arg5)
-  })
-}
-
-},{}],3:[function(require,module,exports){
-var mutate = require('xtend/mutable')
-var nanotick = require('nanotick')
-var assert = require('assert')
-var xtend = require('xtend')
-
-var applyHook = require('./apply-hook')
-
-module.exports = dispatcher
-
-// initialize a new barracks instance
-// obj -> obj
-function dispatcher (hooks) {
-  hooks = hooks || {}
-  assert.equal(typeof hooks, 'object', 'barracks: hooks should be undefined or an object')
-
-  var onStateChangeHooks = []
-  var onActionHooks = []
-  var onErrorHooks = []
-
-  var subscriptionWraps = []
-  var initialStateWraps = []
-  var reducerWraps = []
-  var effectWraps = []
-
-  use(hooks)
-
-  var reducersCalled = false
-  var effectsCalled = false
-  var stateCalled = false
-  var subsCalled = false
-  var stopped = false
-
-  var subscriptions = start._subscriptions = {}
-  var reducers = start._reducers = {}
-  var effects = start._effects = {}
-  var models = start._models = []
-  var _state = {}
-
-  var tick = nanotick()
-
-  start.model = setModel
-  start.state = getState
-  start.start = start
-  start.stop = stop
-  start.use = use
-
-  return start
-
-  // push an object of hooks onto an array
-  // obj -> null
-  function use (hooks) {
-    assert.equal(typeof hooks, 'object', 'barracks.use: hooks should be an object')
-    assert.ok(!hooks.onError || typeof hooks.onError === 'function', 'barracks.use: onError should be undefined or a function')
-    assert.ok(!hooks.onAction || typeof hooks.onAction === 'function', 'barracks.use: onAction should be undefined or a function')
-    assert.ok(!hooks.onStateChange || typeof hooks.onStateChange === 'function', 'barracks.use: onStateChange should be undefined or a function')
-
-    if (hooks.onStateChange) onStateChangeHooks.push(hooks.onStateChange)
-    if (hooks.onError) onErrorHooks.push(wrapOnError(hooks.onError))
-    if (hooks.onAction) onActionHooks.push(hooks.onAction)
-    if (hooks.wrapSubscriptions) subscriptionWraps.push(hooks.wrapSubscriptions)
-    if (hooks.wrapInitialState) initialStateWraps.push(hooks.wrapInitialState)
-    if (hooks.wrapReducers) reducerWraps.push(hooks.wrapReducers)
-    if (hooks.wrapEffects) effectWraps.push(hooks.wrapEffects)
-    if (hooks.models) hooks.models.forEach(setModel)
-  }
-
-  // push a model to be initiated
-  // obj -> null
-  function setModel (model) {
-    assert.equal(typeof model, 'object', 'barracks.store.model: model should be an object')
-    models.push(model)
-  }
-
-  // get the current state from the store
-  // obj? -> obj
-  function getState (opts) {
-    opts = opts || {}
-    assert.equal(typeof opts, 'object', 'barracks.store.state: opts should be an object')
-
-    var state = opts.state
-    if (!opts.state && opts.freeze === false) return xtend(_state)
-    else if (!opts.state) return Object.freeze(xtend(_state))
-    assert.equal(typeof state, 'object', 'barracks.store.state: state should be an object')
-
-    var namespaces = []
-    var newState = {}
-
-    // apply all fields from the model, and namespaced fields from the passed
-    // in state
-    models.forEach(function (model) {
-      var ns = model.namespace
-      namespaces.push(ns)
-      var modelState = model.state || {}
-      if (ns) {
-        newState[ns] = newState[ns] || {}
-        apply(ns, modelState, newState)
-        newState[ns] = xtend(newState[ns], state[ns])
-      } else {
-        mutate(newState, modelState)
-      }
-    })
-
-    // now apply all fields that weren't namespaced from the passed in state
-    Object.keys(state).forEach(function (key) {
-      if (namespaces.indexOf(key) !== -1) return
-      newState[key] = state[key]
-    })
-
-    var tmpState = xtend(_state, xtend(state, newState))
-    var wrappedState = wrapHook(tmpState, initialStateWraps)
-
-    return (opts.freeze === false)
-      ? wrappedState
-      : Object.freeze(wrappedState)
-  }
-
-  // initialize the store hooks, get the send() function
-  // obj? -> fn
-  function start (opts) {
-    opts = opts || {}
-    assert.equal(typeof opts, 'object', 'barracks.store.start: opts should be undefined or an object')
-
-    // register values from the models
-    models.forEach(function (model) {
-      var ns = model.namespace
-      if (!stateCalled && model.state && opts.state !== false) {
-        var modelState = model.state || {}
-        if (ns) {
-          _state[ns] = _state[ns] || {}
-          apply(ns, modelState, _state)
-        } else {
-          mutate(_state, modelState)
-        }
-      }
-      if (!reducersCalled && model.reducers && opts.reducers !== false) {
-        apply(ns, model.reducers, reducers, function (cb) {
-          return wrapHook(cb, reducerWraps)
-        })
-      }
-      if (!effectsCalled && model.effects && opts.effects !== false) {
-        apply(ns, model.effects, effects, function (cb) {
-          return wrapHook(cb, effectWraps)
-        })
-      }
-      if (!subsCalled && model.subscriptions && opts.subscriptions !== false) {
-        apply(ns, model.subscriptions, subscriptions, function (cb, key) {
-          var send = createSend('subscription: ' + (ns ? ns + ':' + key : key))
-          cb = wrapHook(cb, subscriptionWraps)
-          cb(send, function (err) {
-            applyHook(onErrorHooks, err, _state, createSend)
-          })
-          return cb
-        })
-      }
-    })
-
-    // the state wrap is special because we want to operate on the full
-    // state rather than indvidual chunks, so we apply it outside the loop
-    if (!stateCalled && opts.state !== false) {
-      _state = wrapHook(_state, initialStateWraps)
-    }
-
-    if (!opts.noSubscriptions) subsCalled = true
-    if (!opts.noReducers) reducersCalled = true
-    if (!opts.noEffects) effectsCalled = true
-    if (!opts.noState) stateCalled = true
-
-    if (!onErrorHooks.length) onErrorHooks.push(wrapOnError(defaultOnError))
-
-    return createSend
-
-    // call an action from a view
-    // (str, bool?) -> (str, any?, fn?) -> null
-    function createSend (selfName, callOnError) {
-      assert.equal(typeof selfName, 'string', 'barracks.store.start.createSend: selfName should be a string')
-      assert.ok(!callOnError || typeof callOnError === 'boolean', 'barracks.store.start.send: callOnError should be undefined or a boolean')
-
-      return function send (name, data, cb) {
-        if (!cb && !callOnError) {
-          cb = data
-          data = null
-        }
-        data = (typeof data === 'undefined' ? null : data)
-
-        assert.equal(typeof name, 'string', 'barracks.store.start.send: name should be a string')
-        assert.ok(!cb || typeof cb === 'function', 'barracks.store.start.send: cb should be a function')
-
-        var done = callOnError ? onErrorCallback : cb
-        _send(name, data, selfName, done)
-
-        function onErrorCallback (err) {
-          err = err || null
-          if (err) {
-            applyHook(onErrorHooks, err, _state, function createSend (selfName) {
-              return function send (name, data) {
-                assert.equal(typeof name, 'string', 'barracks.store.start.send: name should be a string')
-                data = (typeof data === 'undefined' ? null : data)
-                _send(name, data, selfName, done)
-              }
-            })
-          }
-        }
-      }
-    }
-
-    // call an action
-    // (str, str, any, fn) -> null
-    function _send (name, data, caller, cb) {
-      if (stopped) return
-
-      assert.equal(typeof name, 'string', 'barracks._send: name should be a string')
-      assert.equal(typeof caller, 'string', 'barracks._send: caller should be a string')
-      assert.equal(typeof cb, 'function', 'barracks._send: cb should be a function')
-
-      ;(tick(function () {
-        var reducersCalled = false
-        var effectsCalled = false
-        var newState = xtend(_state)
-
-        if (onActionHooks.length) {
-          applyHook(onActionHooks, _state, data, name, caller, createSend)
-        }
-
-        // validate if a namespace exists. Namespaces are delimited by ':'.
-        var actionName = name
-        if (/:/.test(name)) {
-          var arr = name.split(':')
-          var ns = arr.shift()
-          actionName = arr.join(':')
-        }
-
-        var _reducers = ns ? reducers[ns] : reducers
-        if (_reducers && _reducers[actionName]) {
-          if (ns) {
-            var reducedState = _reducers[actionName](_state[ns], data)
-            newState[ns] = xtend(_state[ns], reducedState)
-          } else {
-            mutate(newState, reducers[actionName](_state, data))
-          }
-          reducersCalled = true
-          if (onStateChangeHooks.length) {
-            applyHook(onStateChangeHooks, newState, data, _state, actionName, createSend)
-          }
-          _state = newState
-          cb(null, newState)
-        }
-
-        var _effects = ns ? effects[ns] : effects
-        if (!reducersCalled && _effects && _effects[actionName]) {
-          var send = createSend('effect: ' + name)
-          if (ns) _effects[actionName](_state[ns], data, send, cb)
-          else _effects[actionName](_state, data, send, cb)
-          effectsCalled = true
-        }
-
-        if (!reducersCalled && !effectsCalled) {
-          throw new Error('Could not find action ' + actionName)
-        }
-      }))()
-    }
-  }
-
-  // stop an app, essentially turns
-  // all send() calls into no-ops.
-  // () -> null
-  function stop () {
-    stopped = true
-  }
-}
-
-// compose an object conditionally
-// optionally contains a namespace
-// which is used to nest properties.
-// (str, obj, obj, fn?) -> null
-function apply (ns, source, target, wrap) {
-  if (ns && !target[ns]) target[ns] = {}
-  Object.keys(source).forEach(function (key) {
-    var cb = wrap ? wrap(source[key], key) : source[key]
-    if (ns) target[ns][key] = cb
-    else target[key] = cb
-  })
-}
-
-// handle errors all the way at the top of the trace
-// err? -> null
-function defaultOnError (err) {
-  throw err
-}
-
-function wrapOnError (onError) {
-  return function onErrorWrap (err, state, createSend) {
-    if (err) onError(err, state, createSend)
-  }
-}
-
-// take a apply an array of transforms onto a value. The new value
-// must be returned synchronously from the transform
-// (any, [fn]) -> any
-function wrapHook (value, transforms) {
-  transforms.forEach(function (transform) {
-    value = transform(value)
-  })
-  return value
-}
-
-},{"./apply-hook":2,"assert":1,"nanotick":15,"xtend":31,"xtend/mutable":32}],4:[function(require,module,exports){
-var document = require('global/document')
+},{"util/":25}],2:[function(require,module,exports){
 var hyperx = require('hyperx')
-var onload = require('on-load')
+
+var trailingNewlineRegex = /\n[\s]+$/
+var leadingNewlineRegex = /^\n[\s]+/
+var trailingSpaceRegex = /[\s]+$/
+var leadingSpaceRegex = /^[\s]+/
+var multiSpaceRegex = /[\n\s]+/g
 
 var SVGNS = 'http://www.w3.org/2000/svg'
 var XLINKNS = 'http://www.w3.org/1999/xlink'
 
-var BOOL_PROPS = {
-  autofocus: 1,
-  checked: 1,
-  defaultchecked: 1,
-  disabled: 1,
-  formnovalidate: 1,
-  indeterminate: 1,
-  readonly: 1,
-  required: 1,
-  selected: 1,
-  willvalidate: 1
-}
+var BOOL_PROPS = [
+  'autofocus', 'checked', 'defaultchecked', 'disabled', 'formnovalidate',
+  'indeterminate', 'readonly', 'required', 'selected', 'willvalidate'
+]
+
+var COMMENT_TAG = '!--'
+
+var TEXT_TAGS = [
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite', 'data', 'dfn', 'em', 'i',
+  'kbd', 'mark', 'q', 'rp', 'rt', 'rtc', 'ruby', 's', 'amp', 'small', 'span',
+  'strong', 'sub', 'sup', 'time', 'u', 'var', 'wbr'
+]
+
+var CODE_TAGS = [
+  'code', 'pre'
+]
+
 var SVG_TAGS = [
-  'svg',
-  'altGlyph', 'altGlyphDef', 'altGlyphItem', 'animate', 'animateColor',
+  'svg', 'altGlyph', 'altGlyphDef', 'altGlyphItem', 'animate', 'animateColor',
   'animateMotion', 'animateTransform', 'circle', 'clipPath', 'color-profile',
   'cursor', 'defs', 'desc', 'ellipse', 'feBlend', 'feColorMatrix',
-  'feComponentTransfer', 'feComposite', 'feConvolveMatrix', 'feDiffuseLighting',
-  'feDisplacementMap', 'feDistantLight', 'feFlood', 'feFuncA', 'feFuncB',
-  'feFuncG', 'feFuncR', 'feGaussianBlur', 'feImage', 'feMerge', 'feMergeNode',
-  'feMorphology', 'feOffset', 'fePointLight', 'feSpecularLighting',
-  'feSpotLight', 'feTile', 'feTurbulence', 'filter', 'font', 'font-face',
-  'font-face-format', 'font-face-name', 'font-face-src', 'font-face-uri',
-  'foreignObject', 'g', 'glyph', 'glyphRef', 'hkern', 'image', 'line',
-  'linearGradient', 'marker', 'mask', 'metadata', 'missing-glyph', 'mpath',
-  'path', 'pattern', 'polygon', 'polyline', 'radialGradient', 'rect',
+  'feComponentTransfer', 'feComposite', 'feConvolveMatrix',
+  'feDiffuseLighting', 'feDisplacementMap', 'feDistantLight', 'feFlood',
+  'feFuncA', 'feFuncB', 'feFuncG', 'feFuncR', 'feGaussianBlur', 'feImage',
+  'feMerge', 'feMergeNode', 'feMorphology', 'feOffset', 'fePointLight',
+  'feSpecularLighting', 'feSpotLight', 'feTile', 'feTurbulence', 'filter',
+  'font', 'font-face', 'font-face-format', 'font-face-name', 'font-face-src',
+  'font-face-uri', 'foreignObject', 'g', 'glyph', 'glyphRef', 'hkern', 'image',
+  'line', 'linearGradient', 'marker', 'mask', 'metadata', 'missing-glyph',
+  'mpath', 'path', 'pattern', 'polygon', 'polyline', 'radialGradient', 'rect',
   'set', 'stop', 'switch', 'symbol', 'text', 'textPath', 'title', 'tref',
   'tspan', 'use', 'view', 'vkern'
 ]
@@ -865,24 +556,13 @@ function belCreateElement (tag, props, children) {
   // Create the element
   if (ns) {
     el = document.createElementNS(ns, tag)
+  } else if (tag === COMMENT_TAG) {
+    return document.createComment(props.comment)
   } else {
     el = document.createElement(tag)
   }
 
-  // If adding onload events
-  if (props.onload || props.onunload) {
-    var load = props.onload || function () {}
-    var unload = props.onunload || function () {}
-    onload(el, function belOnload () {
-      load(el)
-    }, function belOnunload () {
-      unload(el)
-    },
-    // We have to use non-standard `caller` to find who invokes `belCreateElement`
-    belCreateElement.caller.caller.caller)
-    delete props.onload
-    delete props.onunload
-  }
+  var nodeName = el.nodeName.toLowerCase()
 
   // Create the properties
   for (var p in props) {
@@ -899,7 +579,7 @@ function belCreateElement (tag, props, children) {
         p = 'for'
       }
       // If a property is boolean, set itself to the key
-      if (BOOL_PROPS[key]) {
+      if (BOOL_PROPS.indexOf(key) !== -1) {
         if (val === 'true') val = key
         else if (val === 'false') continue
       }
@@ -922,9 +602,16 @@ function belCreateElement (tag, props, children) {
     }
   }
 
+  appendChild(children)
+  return el
+
   function appendChild (childs) {
     if (!Array.isArray(childs)) return
-    for (var i = 0; i < childs.length; i++) {
+
+    var hadText = false
+    var value, leader
+
+    for (var i = 0, len = childs.length; i < len; i++) {
       var node = childs[i]
       if (Array.isArray(node)) {
         appendChild(node)
@@ -933,36 +620,111 @@ function belCreateElement (tag, props, children) {
 
       if (typeof node === 'number' ||
         typeof node === 'boolean' ||
+        typeof node === 'function' ||
         node instanceof Date ||
         node instanceof RegExp) {
         node = node.toString()
       }
 
-      if (typeof node === 'string') {
-        if (el.lastChild && el.lastChild.nodeName === '#text') {
-          el.lastChild.nodeValue += node
-          continue
-        }
-        node = document.createTextNode(node)
-      }
+      var lastChild = el.childNodes[el.childNodes.length - 1]
 
-      if (node && node.nodeType) {
+      // Iterate over text nodes
+      if (typeof node === 'string') {
+        hadText = true
+
+        // If we already had text, append to the existing text
+        if (lastChild && lastChild.nodeName === '#text') {
+          lastChild.nodeValue += node
+
+        // We didn't have a text node yet, create one
+        } else {
+          node = document.createTextNode(node)
+          el.appendChild(node)
+          lastChild = node
+        }
+
+        // If this is the last of the child nodes, make sure we close it out
+        // right
+        if (i === len - 1) {
+          hadText = false
+          // Trim the child text nodes if the current node isn't a
+          // node where whitespace matters.
+          if (TEXT_TAGS.indexOf(nodeName) === -1 &&
+            CODE_TAGS.indexOf(nodeName) === -1) {
+            value = lastChild.nodeValue
+              .replace(leadingNewlineRegex, '')
+              .replace(trailingSpaceRegex, '')
+              .replace(trailingNewlineRegex, '')
+              .replace(multiSpaceRegex, ' ')
+            if (value === '') {
+              el.removeChild(lastChild)
+            } else {
+              lastChild.nodeValue = value
+            }
+          } else if (CODE_TAGS.indexOf(nodeName) === -1) {
+            // The very first node in the list should not have leading
+            // whitespace. Sibling text nodes should have whitespace if there
+            // was any.
+            leader = i === 0 ? '' : ' '
+            value = lastChild.nodeValue
+              .replace(leadingNewlineRegex, leader)
+              .replace(leadingSpaceRegex, ' ')
+              .replace(trailingSpaceRegex, '')
+              .replace(trailingNewlineRegex, '')
+              .replace(multiSpaceRegex, ' ')
+            lastChild.nodeValue = value
+          }
+        }
+
+      // Iterate over DOM nodes
+      } else if (node && node.nodeType) {
+        // If the last node was a text node, make sure it is properly closed out
+        if (hadText) {
+          hadText = false
+
+          // Trim the child text nodes if the current node isn't a
+          // text node or a code node
+          if (TEXT_TAGS.indexOf(nodeName) === -1 &&
+            CODE_TAGS.indexOf(nodeName) === -1) {
+            value = lastChild.nodeValue
+              .replace(leadingNewlineRegex, '')
+              .replace(trailingNewlineRegex, '')
+              .replace(multiSpaceRegex, ' ')
+
+            // Remove empty text nodes, append otherwise
+            if (value === '') {
+              el.removeChild(lastChild)
+            } else {
+              lastChild.nodeValue = value
+            }
+          // Trim the child nodes if the current node is not a node
+          // where all whitespace must be preserved
+          } else if (CODE_TAGS.indexOf(nodeName) === -1) {
+            value = lastChild.nodeValue
+              .replace(leadingSpaceRegex, ' ')
+              .replace(leadingNewlineRegex, '')
+              .replace(trailingNewlineRegex, '')
+              .replace(multiSpaceRegex, ' ')
+            lastChild.nodeValue = value
+          }
+        }
+
+        // Store the last nodename
+        var _nodeName = node.nodeName
+        if (_nodeName) nodeName = _nodeName.toLowerCase()
+
+        // Append the node to the DOM
         el.appendChild(node)
       }
     }
   }
-  appendChild(children)
-
-  return el
 }
 
-module.exports = hyperx(belCreateElement)
+module.exports = hyperx(belCreateElement, {comments: true})
 module.exports.default = module.exports
 module.exports.createElement = belCreateElement
 
-},{"global/document":9,"hyperx":12,"on-load":16}],5:[function(require,module,exports){
-
-},{}],6:[function(require,module,exports){
+},{"hyperx":8}],3:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -1144,260 +906,226 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],7:[function(require,module,exports){
-module.exports = require('yo-yo')
+},{}],4:[function(require,module,exports){
+module.exports = require('bel')
 
-},{"yo-yo":33}],8:[function(require,module,exports){
-const createLocation = require('sheet-router/create-location')
-const onHistoryChange = require('sheet-router/history')
-const sheetRouter = require('sheet-router')
-const onHref = require('sheet-router/href')
-const walk = require('sheet-router/walk')
-const mutate = require('xtend/mutable')
-const barracks = require('barracks')
-const nanoraf = require('nanoraf')
-const assert = require('assert')
-const xtend = require('xtend')
-const yo = require('yo-yo')
+},{"bel":2}],5:[function(require,module,exports){
+var scrollToAnchor = require('scroll-to-anchor')
+var documentReady = require('document-ready')
+var nanolocation = require('nanolocation')
+var nanotiming = require('nanotiming')
+var nanorouter = require('nanorouter')
+var nanomorph = require('nanomorph')
+var nanoquery = require('nanoquery')
+var nanohref = require('nanohref')
+var nanoraf = require('nanoraf')
+var nanobus = require('nanobus')
+var assert = require('assert')
+var xtend = require('xtend')
 
-module.exports = choo
+module.exports = Choo
 
-// framework for creating sturdy web applications
-// null -> fn
-function choo (opts) {
+var HISTORY_OBJECT = {}
+
+function Choo (opts) {
+  if (!(this instanceof Choo)) return new Choo(opts)
   opts = opts || {}
 
-  const _store = start._store = barracks()
-  var _router = start._router = null
-  var _routerOpts = null
-  var _rootNode = null
-  var _routes = null
-  var _frame = null
+  assert.equal(typeof opts, 'object', 'choo: opts should be type object')
 
-  if (typeof window !== 'undefined') {
-    _store.use({ onStateChange: render })
+  var self = this
+
+  // define events used by choo
+  this._events = {
+    DOMCONTENTLOADED: 'DOMContentLoaded',
+    DOMTITLECHANGE: 'DOMTitleChange',
+    REPLACESTATE: 'replaceState',
+    PUSHSTATE: 'pushState',
+    NAVIGATE: 'navigate',
+    POPSTATE: 'popState',
+    RENDER: 'render'
   }
-  _store.use(opts)
 
-  start.toString = toString
-  start.router = router
-  start.model = model
-  start.start = start
-  start.stop = _store.stop
-  start.use = use
+  // properties for internal use only
+  this._historyEnabled = opts.history === undefined ? true : opts.history
+  this._hrefEnabled = opts.href === undefined ? true : opts.href
+  this._hasWindow = typeof window !== 'undefined'
+  this._createLocation = nanolocation
+  this._loaded = false
+  this._tree = null
 
-  return start
+  // properties that are part of the API
+  this.router = nanorouter({ curry: true })
+  this.emitter = nanobus('choo.emit')
+  this.state = { events: this._events }
 
-  // render the application to a string
-  // (str, obj) -> str
-  function toString (route, serverState) {
-    serverState = serverState || {}
-    assert.equal(typeof route, 'string', 'choo.app.toString: route must be a string')
-    assert.equal(typeof serverState, 'object', 'choo.app.toString: serverState must be an object')
-    _store.start({ subscriptions: false, reducers: false, effects: false })
+  // listen for title changes; available even when calling .toString()
+  if (this._hasWindow) this.state.title = document.title
+  this.emitter.prependListener(this._events.DOMTITLECHANGE, function (title) {
+    assert.equal(typeof title, 'string', 'events.DOMTitleChange: title should be type string')
+    self.state.title = title
+    if (self._hasWindow) document.title = title
+  })
+}
 
-    const state = _store.state({ state: serverState })
-    const router = createRouter(_routerOpts, _routes, createSend)
-    const tree = router(route, state)
-    return tree.outerHTML || tree.toString()
+Choo.prototype.route = function (route, handler) {
+  assert.equal(typeof route, 'string', 'choo.route: route should be type string')
+  assert.equal(typeof handler, 'function', 'choo.handler: route should be type function')
 
-    function createSend () {
-      return function send () {
-        assert.ok(false, 'choo: send() cannot be called from Node')
+  var self = this
+  this.router.on(route, function (params) {
+    return function () {
+      self.state.params = params
+      self.state.route = route
+      var routeTiming = nanotiming("choo.route('" + route + "')")
+      var res = handler(self.state, function (eventName, data) {
+        self.emitter.emit(eventName, data)
+      })
+      routeTiming()
+      return res
+    }
+  })
+}
+
+Choo.prototype.use = function (cb) {
+  assert.equal(typeof cb, 'function', 'choo.use: cb should be type function')
+  var endTiming = nanotiming('choo.use')
+  cb(this.state, this.emitter, this)
+  endTiming()
+}
+
+Choo.prototype.start = function () {
+  assert.equal(typeof window, 'object', 'choo.start: window was not found. .start() must be called in a browser, use .toString() if running in Node')
+
+  var self = this
+  if (this._historyEnabled) {
+    this.emitter.prependListener(this._events.NAVIGATE, function () {
+      self.state.query = nanoquery(window.location.search)
+      if (self._loaded) {
+        self.emitter.emit(self._events.RENDER)
+        setTimeout(scrollToAnchor.bind(null, window.location.hash), 0)
       }
+    })
+
+    this.emitter.prependListener(this._events.POPSTATE, function () {
+      self.emitter.emit(self._events.NAVIGATE)
+    })
+
+    this.emitter.prependListener(this._events.PUSHSTATE, function (href) {
+      assert.equal(typeof href, 'string', 'events.pushState: href should be type string')
+      window.history.pushState(HISTORY_OBJECT, null, href)
+      self.emitter.emit(self._events.NAVIGATE)
+    })
+
+    this.emitter.prependListener(this._events.REPLACESTATE, function (href) {
+      assert.equal(typeof href, 'string', 'events.replaceState: href should be type string')
+      window.history.replaceState(HISTORY_OBJECT, null, href)
+      self.emitter.emit(self._events.NAVIGATE)
+    })
+
+    window.onpopstate = function () {
+      self.emitter.emit(self._events.POPSTATE)
     }
-  }
 
-  // start the application
-  // (str?, obj?) -> DOMNode
-  function start () {
-    _store.model(createLocationModel(opts))
-    const createSend = _store.start(opts)
-    _router = start._router = createRouter(_routerOpts, _routes, createSend)
-    const state = _store.state({state: {}})
-
-    const tree = _router(state.location.href, state)
-    assert.ok(tree, 'choo.start: the router should always return a valid DOM node')
-    assert.equal(typeof tree, 'object', 'choo.start: the router should always return a valid DOM node')
-    _rootNode = tree
-    tree.done = done
-
-    return tree
-
-    // allow a 'mount' function to return the new node
-    // html -> null
-    function done (newNode) {
-      _rootNode = newNode
-    }
-  }
-
-  // update the DOM after every state mutation
-  // (obj, obj, obj, str, fn) -> null
-  function render (state, data, prev, name, createSend) {
-    if (!_frame) {
-      _frame = nanoraf(function (state, prev) {
-        const newTree = _router(state.location.href, state, prev)
-        _rootNode = yo.update(_rootNode, newTree)
+    if (self._hrefEnabled) {
+      nanohref(function (location) {
+        var href = location.href
+        var currHref = window.location.href
+        if (href === currHref) return
+        self.emitter.emit(self._events.PUSHSTATE, href)
       })
     }
-    _frame(state, prev)
   }
 
-  // register all routes on the router
-  // (str?, [fn|[fn]]) -> obj
-  function router (defaultRoute, routes) {
-    _routerOpts = defaultRoute
-    _routes = routes
-  }
+  this.state.href = this._createLocation()
+  this._tree = this.router(this.state.href)
+  this.state.query = nanoquery(window.location.search)
+  assert.ok(this._tree, 'choo.start: no valid DOM node returned for location ' + this.state.href)
 
-  // create a new model
-  // (str?, obj) -> null
-  function model (model) {
-    _store.model(model)
-  }
+  this.emitter.prependListener(self._events.RENDER, nanoraf(function () {
+    var renderTiming = nanotiming('choo.render')
 
-  // register a plugin
-  // (obj) -> null
-  function use (hooks) {
-    assert.equal(typeof hooks, 'object', 'choo.use: hooks should be an object')
-    _store.use(hooks)
-  }
+    self.state.href = self._createLocation()
+    var newTree = self.router(self.state.href)
+    assert.ok(newTree, 'choo.render: no valid DOM node returned for location ' + self.state.href)
 
-  // create a new router with a custom `createRoute()` function
-  // (str?, obj) -> null
-  function createRouter (routerOpts, routes, createSend) {
-    var prev = null
-    if (!routes) {
-      routes = routerOpts
-      routerOpts = {}
-    }
-    routerOpts = mutate({ thunk: 'match' }, routerOpts)
-    const router = sheetRouter(routerOpts, routes)
-    walk(router, wrap)
+    assert.equal(self._tree.nodeName, newTree.nodeName, 'choo.render: The target node <' +
+      self._tree.nodeName.toLowerCase() + '> is not the same type as the new node <' +
+      newTree.nodeName.toLowerCase() + '>.')
 
-    return router
+    var morphTiming = nanotiming('choo.morph')
+    nanomorph(self._tree, newTree)
+    morphTiming()
 
-    function wrap (route, handler) {
-      const send = createSend('view: ' + route, true)
-      return function chooWrap (params) {
-        return function (state) {
-          // TODO(yw): find a way to wrap handlers so params shows up in state
-          const nwState = xtend(state)
-          nwState.location = xtend(nwState.location, { params: params })
+    renderTiming()
+  }))
 
-          const nwPrev = prev
-          prev = nwState // save for next time
+  documentReady(function () {
+    self.emitter.emit(self._events.DOMCONTENTLOADED)
+    self._loaded = true
+  })
 
-          if (opts.freeze !== false) Object.freeze(nwState)
-          return handler(nwState, nwPrev, send)
-        }
-      }
-    }
-  }
+  return this._tree
 }
 
-// application location model
-// obj -> obj
-function createLocationModel (opts) {
-  return {
-    namespace: 'location',
-    state: mutate(createLocation(), { params: {} }),
-    subscriptions: createSubscriptions(opts),
-    effects: { set: setLocation, touch: touchLocation },
-    reducers: { update: updateLocation }
-  }
+Choo.prototype.mount = function mount (selector) {
+  assert.equal(typeof window, 'object', 'choo.mount: window was not found. .mount() must be called in a browser, use .toString() if running in Node')
+  assert.equal(typeof selector, 'string', 'choo.mount: selector should be type string')
 
-  // update the location on the state
-  // try and jump to an anchor on the page if it exists
-  // (obj, obj) -> obj
-  function updateLocation (state, data) {
-    if (opts.history !== false && data.hash && data.hash !== state.hash) {
-      try {
-        const el = document.querySelector(data.hash)
-        if (el) el.scrollIntoView(true)
-      } catch (e) {
-        return data
-      }
-    }
-    return data
-  }
+  var self = this
 
-  // update internal location only
-  // (str, obj, fn, fn) -> null
-  function touchLocation (state, data, send, done) {
-    const newLocation = createLocation(state, data)
-    send('location:update', newLocation, done)
-  }
+  documentReady(function () {
+    var renderTiming = nanotiming('choo.render')
+    var newTree = self.start()
 
-  // set a new location e.g. "/foo/bar#baz?beep=boop"
-  // (str, obj, fn, fn) -> null
-  function setLocation (state, data, send, done) {
-    const newLocation = createLocation(state, data)
+    self._tree = document.querySelector(selector)
+    assert.ok(self._tree, 'choo.mount: could not query selector: ' + selector)
+    assert.equal(self._tree.nodeName, newTree.nodeName, 'choo.mount: The target node <' +
+      self._tree.nodeName.toLowerCase() + '> is not the same type as the new node <' +
+      newTree.nodeName.toLowerCase() + '>.')
 
-    // update url bar if it changed
-    if (opts.history !== false && newLocation.href !== state.href) {
-      window.history.pushState({}, null, newLocation.href)
-    }
+    var morphTiming = nanotiming('choo.morph')
+    nanomorph(self._tree, newTree)
+    morphTiming()
 
-    send('location:update', newLocation, done)
-  }
-
-  function createSubscriptions (opts) {
-    const subs = {}
-
-    if (opts.history !== false) {
-      subs.handleHistory = function (send, done) {
-        onHistoryChange(function navigate (href) {
-          send('location:touch', href, done)
-        })
-      }
-    }
-
-    if (opts.href !== false) {
-      subs.handleHref = function (send, done) {
-        onHref(function navigate (location) {
-          send('location:set', location, done)
-        })
-      }
-    }
-
-    return subs
-  }
+    renderTiming()
+  })
 }
 
-},{"assert":1,"barracks":3,"nanoraf":14,"sheet-router":21,"sheet-router/create-location":18,"sheet-router/history":19,"sheet-router/href":20,"sheet-router/walk":23,"xtend":31,"xtend/mutable":32,"yo-yo":33}],9:[function(require,module,exports){
-(function (global){
-var topLevel = typeof global !== 'undefined' ? global :
-    typeof window !== 'undefined' ? window : {}
-var minDoc = require('min-document');
+Choo.prototype.toString = function (location, state) {
+  this.state = xtend(this.state, state || {})
 
-if (typeof document !== 'undefined') {
-    module.exports = document;
-} else {
-    var doccy = topLevel['__GLOBAL_DOCUMENT_CACHE@4'];
+  assert.notEqual(typeof window, 'object', 'choo.mount: window was found. .toString() must be called in Node, use .start() or .mount() if running in the browser')
+  assert.equal(typeof location, 'string', 'choo.toString: location should be type string')
+  assert.equal(typeof this.state, 'object', 'choo.toString: state should be type object')
 
-    if (!doccy) {
-        doccy = topLevel['__GLOBAL_DOCUMENT_CACHE@4'] = minDoc;
-    }
-
-    module.exports = doccy;
+  this.state.href = location.replace(/\?.+$/, '')
+  this.state.query = nanoquery(location)
+  var html = this.router(location)
+  assert.ok(html, 'choo.toString: no valid value returned for the route ' + location)
+  return html.toString()
 }
 
-}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"min-document":5}],10:[function(require,module,exports){
-(function (global){
-if (typeof window !== "undefined") {
-    module.exports = window;
-} else if (typeof global !== "undefined") {
-    module.exports = global;
-} else if (typeof self !== "undefined"){
-    module.exports = self;
-} else {
-    module.exports = {};
+},{"assert":1,"document-ready":6,"nanobus":10,"nanohref":11,"nanolocation":12,"nanomorph":13,"nanoquery":16,"nanoraf":17,"nanorouter":18,"nanotiming":19,"scroll-to-anchor":22,"xtend":29}],6:[function(require,module,exports){
+'use strict'
+
+var assert = require('assert')
+
+module.exports = ready
+
+function ready (callback) {
+  assert.notEqual(typeof document, 'undefined', 'document-ready only runs in the browser')
+  var state = document.readyState
+  if (state === 'complete' || state === 'interactive') {
+    return setTimeout(callback, 0)
+  }
+
+  document.addEventListener('DOMContentLoaded', function onLoad () {
+    callback()
+  })
 }
 
-}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],11:[function(require,module,exports){
+},{"assert":1}],7:[function(require,module,exports){
 module.exports = attributeToProperty
 
 var transform = {
@@ -1418,7 +1146,7 @@ function attributeToProperty (h) {
   }
 }
 
-},{}],12:[function(require,module,exports){
+},{}],8:[function(require,module,exports){
 var attrToProp = require('hyperscript-attribute-to-property')
 
 var VAR = 0, TEXT = 1, OPEN = 2, CLOSE = 3, ATTR = 4
@@ -1426,12 +1154,15 @@ var ATTR_KEY = 5, ATTR_KEY_W = 6
 var ATTR_VALUE_W = 7, ATTR_VALUE = 8
 var ATTR_VALUE_SQ = 9, ATTR_VALUE_DQ = 10
 var ATTR_EQ = 11, ATTR_BREAK = 12
+var COMMENT = 13
 
 module.exports = function (h, opts) {
-  h = attrToProp(h)
   if (!opts) opts = {}
   var concat = opts.concat || function (a, b) {
     return String(a) + String(b)
+  }
+  if (opts.attrToProp !== false) {
+    h = attrToProp(h)
   }
 
   return function (strings) {
@@ -1562,7 +1293,7 @@ module.exports = function (h, opts) {
           if (reg.length) res.push([TEXT, reg])
           reg = ''
           state = OPEN
-        } else if (c === '>' && !quot(state)) {
+        } else if (c === '>' && !quot(state) && state !== COMMENT) {
           if (state === OPEN) {
             res.push([OPEN,reg])
           } else if (state === ATTR_KEY) {
@@ -1573,7 +1304,19 @@ module.exports = function (h, opts) {
           res.push([CLOSE])
           reg = ''
           state = TEXT
-        } else if (state === TEXT) {
+        } else if (state === COMMENT && /-$/.test(reg) && c === '-') {
+          if (opts.comments) {
+            res.push([ATTR_VALUE,reg.substr(0, reg.length - 1)],[CLOSE])
+          }
+          reg = ''
+          state = TEXT
+        } else if (state === OPEN && /^!--$/.test(reg)) {
+          if (opts.comments) {
+            res.push([OPEN, reg],[ATTR_KEY,'comment'],[ATTR_EQ])
+          }
+          reg = c
+          state = COMMENT
+        } else if (state === TEXT || state === COMMENT) {
           reg += c
         } else if (state === OPEN && /\s/.test(c)) {
           res.push([OPEN, reg])
@@ -1581,7 +1324,7 @@ module.exports = function (h, opts) {
           state = ATTR
         } else if (state === OPEN) {
           reg += c
-        } else if (state === ATTR && /[\w-]/.test(c)) {
+        } else if (state === ATTR && /[^\s"'=/]/.test(c)) {
           state = ATTR_KEY
           reg = c
         } else if (state === ATTR && /\s/.test(c)) {
@@ -1668,7 +1411,7 @@ function has (obj, key) { return hasOwn.call(obj, key) }
 var closeRE = RegExp('^(' + [
   'area', 'base', 'basefont', 'bgsound', 'br', 'col', 'command', 'embed',
   'frame', 'hr', 'img', 'input', 'isindex', 'keygen', 'link', 'meta', 'param',
-  'source', 'track', 'wbr',
+  'source', 'track', 'wbr', '!--',
   // SVG TAGS
   'animate', 'animateTransform', 'circle', 'cursor', 'desc', 'ellipse',
   'feBlend', 'feColorMatrix', 'feComposite',
@@ -1683,683 +1426,620 @@ var closeRE = RegExp('^(' + [
 ].join('|') + ')(?:[\.#][a-zA-Z0-9\u007F-\uFFFF_:-]+)*$')
 function selfClosing (tag) { return closeRE.test(tag) }
 
-},{"hyperscript-attribute-to-property":11}],13:[function(require,module,exports){
-'use strict';
+},{"hyperscript-attribute-to-property":7}],9:[function(require,module,exports){
+assert.notEqual = notEqual
+assert.notOk = notOk
+assert.equal = equal
+assert.ok = assert
 
-var range; // Create a range object for efficently rendering strings to elements.
-var NS_XHTML = 'http://www.w3.org/1999/xhtml';
+module.exports = assert
 
-var doc = typeof document === 'undefined' ? undefined : document;
-
-var testEl = doc ?
-    doc.body || doc.createElement('div') :
-    {};
-
-// Fixes <https://github.com/patrick-steele-idem/morphdom/issues/32>
-// (IE7+ support) <=IE7 does not support el.hasAttribute(name)
-var actualHasAttributeNS;
-
-if (testEl.hasAttributeNS) {
-    actualHasAttributeNS = function(el, namespaceURI, name) {
-        return el.hasAttributeNS(namespaceURI, name);
-    };
-} else if (testEl.hasAttribute) {
-    actualHasAttributeNS = function(el, namespaceURI, name) {
-        return el.hasAttribute(name);
-    };
-} else {
-    actualHasAttributeNS = function(el, namespaceURI, name) {
-        return el.getAttributeNode(namespaceURI, name) != null;
-    };
+function equal (a, b, m) {
+  assert(a == b, m) // eslint-disable-line eqeqeq
 }
 
-var hasAttributeNS = actualHasAttributeNS;
+function notEqual (a, b, m) {
+  assert(a != b, m) // eslint-disable-line eqeqeq
+}
 
+function notOk (t, m) {
+  assert(!t, m)
+}
 
-function toElement(str) {
-    if (!range && doc.createRange) {
-        range = doc.createRange();
-        range.selectNode(doc.body);
+function assert (t, m) {
+  if (!t) throw new Error(m || 'AssertionError')
+}
+
+},{}],10:[function(require,module,exports){
+var splice = require('remove-array-items')
+var nanotiming = require('nanotiming')
+var assert = require('assert')
+
+module.exports = Nanobus
+
+function Nanobus (name) {
+  if (!(this instanceof Nanobus)) return new Nanobus(name)
+
+  this._name = name || 'nanobus'
+  this._starListeners = []
+  this._listeners = {}
+}
+
+Nanobus.prototype.emit = function (eventName, data) {
+  assert.equal(typeof eventName, 'string', 'nanobus.emit: eventName should be type string')
+
+  var emitTiming = nanotiming(this._name + "('" + eventName + "')")
+  var listeners = this._listeners[eventName]
+  if (listeners && listeners.length > 0) {
+    this._emit(this._listeners[eventName], data)
+  }
+
+  if (this._starListeners.length > 0) {
+    this._emit(this._starListeners, eventName, data, emitTiming.uuid)
+  }
+  emitTiming()
+
+  return this
+}
+
+Nanobus.prototype.on = Nanobus.prototype.addListener = function (eventName, listener) {
+  assert.equal(typeof eventName, 'string', 'nanobus.on: eventName should be type string')
+  assert.equal(typeof listener, 'function', 'nanobus.on: listener should be type function')
+
+  if (eventName === '*') {
+    this._starListeners.push(listener)
+  } else {
+    if (!this._listeners[eventName]) this._listeners[eventName] = []
+    this._listeners[eventName].push(listener)
+  }
+  return this
+}
+
+Nanobus.prototype.prependListener = function (eventName, listener) {
+  assert.equal(typeof eventName, 'string', 'nanobus.prependListener: eventName should be type string')
+  assert.equal(typeof listener, 'function', 'nanobus.prependListener: listener should be type function')
+
+  if (eventName === '*') {
+    this._starListeners.unshift(listener)
+  } else {
+    if (!this._listeners[eventName]) this._listeners[eventName] = []
+    this._listeners[eventName].unshift(listener)
+  }
+  return this
+}
+
+Nanobus.prototype.once = function (eventName, listener) {
+  assert.equal(typeof eventName, 'string', 'nanobus.once: eventName should be type string')
+  assert.equal(typeof listener, 'function', 'nanobus.once: listener should be type function')
+
+  var self = this
+  this.on(eventName, once)
+  function once () {
+    listener.apply(self, arguments)
+    self.removeListener(eventName, once)
+  }
+  return this
+}
+
+Nanobus.prototype.prependOnceListener = function (eventName, listener) {
+  assert.equal(typeof eventName, 'string', 'nanobus.prependOnceListener: eventName should be type string')
+  assert.equal(typeof listener, 'function', 'nanobus.prependOnceListener: listener should be type function')
+
+  var self = this
+  this.prependListener(eventName, once)
+  function once () {
+    listener.apply(self, arguments)
+    self.removeListener(eventName, once)
+  }
+  return this
+}
+
+Nanobus.prototype.removeListener = function (eventName, listener) {
+  assert.equal(typeof eventName, 'string', 'nanobus.removeListener: eventName should be type string')
+  assert.equal(typeof listener, 'function', 'nanobus.removeListener: listener should be type function')
+
+  if (eventName === '*') {
+    this._starListeners = this._starListeners.slice()
+    return remove(this._starListeners, listener)
+  } else {
+    if (typeof this._listeners[eventName] !== 'undefined') {
+      this._listeners[eventName] = this._listeners[eventName].slice()
     }
 
-    var fragment;
-    if (range && range.createContextualFragment) {
-        fragment = range.createContextualFragment(str);
+    return remove(this._listeners[eventName], listener)
+  }
+
+  function remove (arr, listener) {
+    if (!arr) return
+    var index = arr.indexOf(listener)
+    if (index !== -1) {
+      splice(arr, index, 1)
+      return true
+    }
+  }
+}
+
+Nanobus.prototype.removeAllListeners = function (eventName) {
+  if (eventName) {
+    if (eventName === '*') {
+      this._starListeners = []
     } else {
-        fragment = doc.createElement('body');
-        fragment.innerHTML = str;
+      this._listeners[eventName] = []
     }
-    return fragment.childNodes[0];
+  } else {
+    this._starListeners = []
+    this._listeners = {}
+  }
+  return this
 }
 
-/**
- * Returns true if two node's names are the same.
- *
- * NOTE: We don't bother checking `namespaceURI` because you will never find two HTML elements with the same
- *       nodeName and different namespace URIs.
- *
- * @param {Element} a
- * @param {Element} b The target element
- * @return {boolean}
- */
-function compareNodeNames(fromEl, toEl) {
-    var fromNodeName = fromEl.nodeName;
-    var toNodeName = toEl.nodeName;
+Nanobus.prototype.listeners = function (eventName) {
+  var listeners = eventName !== '*'
+    ? this._listeners[eventName]
+    : this._starListeners
 
-    if (fromNodeName === toNodeName) {
-        return true;
-    }
+  var ret = []
+  if (listeners) {
+    var ilength = listeners.length
+    for (var i = 0; i < ilength; i++) ret.push(listeners[i])
+  }
+  return ret
+}
 
-    if (toEl.actualize &&
-        fromNodeName.charCodeAt(0) < 91 && /* from tag name is upper case */
-        toNodeName.charCodeAt(0) > 90 /* target tag name is lower case */) {
-        // If the target element is a virtual DOM node then we may need to normalize the tag name
-        // before comparing. Normal HTML elements that are in the "http://www.w3.org/1999/xhtml"
-        // are converted to upper case
-        return fromNodeName === toNodeName.toUpperCase();
+Nanobus.prototype._emit = function (arr, eventName, data, uuid) {
+  if (typeof arr === 'undefined') return
+  if (data === undefined) {
+    data = eventName
+    eventName = null
+  }
+  var length = arr.length
+  for (var i = 0; i < length; i++) {
+    var listener = arr[i]
+    if (eventName) {
+      if (uuid !== undefined) listener(eventName, data, uuid)
+      else listener(eventName, data)
     } else {
-        return false;
+      listener(data)
     }
+  }
 }
 
-/**
- * Create an element, optionally with a known namespace URI.
- *
- * @param {string} name the element name, e.g. 'div' or 'svg'
- * @param {string} [namespaceURI] the element's namespace URI, i.e. the value of
- * its `xmlns` attribute or its inferred namespace.
- *
- * @return {Element}
- */
-function createElementNS(name, namespaceURI) {
-    return !namespaceURI || namespaceURI === NS_XHTML ?
-        doc.createElement(name) :
-        doc.createElementNS(namespaceURI, name);
+},{"assert":1,"nanotiming":19,"remove-array-items":21}],11:[function(require,module,exports){
+var assert = require('assert')
+
+var safeExternalLink = /[noopener|noreferrer] [noopener|noreferrer]/
+var protocolLink = /^[\w-_]+:/
+
+module.exports = href
+
+function href (cb, root) {
+  assert.notEqual(typeof window, 'undefined', 'nanohref: expected window to exist')
+
+  root = root || window.document
+
+  assert.equal(typeof cb, 'function', 'nanohref: cb should be type function')
+  assert.equal(typeof root, 'object', 'nanohref: root should be type object')
+
+  window.addEventListener('click', function (e) {
+    if ((e.button && e.button !== 0) ||
+      e.ctrlKey || e.metaKey || e.altKey || e.shiftKey ||
+      e.defaultPrevented) return
+
+    var anchor = (function traverse (node) {
+      if (!node || node === root) return
+      if (node.localName !== 'a' || node.href === undefined) {
+        return traverse(node.parentNode)
+      }
+      return node
+    })(e.target)
+
+    if (!anchor) return
+
+    if (window.location.origin !== anchor.origin ||
+      anchor.hasAttribute('download') ||
+      (anchor.getAttribute('target') === '_blank' &&
+        safeExternalLink.test(anchor.getAttribute('rel'))) ||
+      protocolLink.test(anchor.getAttribute('href'))) return
+
+    e.preventDefault()
+    cb(anchor)
+  })
 }
 
-/**
- * Copies the children of one DOM element to another DOM element
- */
-function moveChildren(fromEl, toEl) {
-    var curChild = fromEl.firstChild;
-    while (curChild) {
-        var nextChild = curChild.nextSibling;
-        toEl.appendChild(curChild);
-        curChild = nextChild;
+},{"assert":1}],12:[function(require,module,exports){
+var assert = require('assert')
+
+module.exports = nanolocation
+
+function nanolocation () {
+  assert.notEqual(typeof window, 'undefined', 'nanolocation: expected window to exist')
+  var pathname = window.location.pathname.replace(/\/$/, '')
+  var hash = window.location.hash.replace(/^#/, '/')
+  return pathname + hash
+}
+
+},{"assert":1}],13:[function(require,module,exports){
+var assert = require('assert')
+var morph = require('./lib/morph')
+
+var TEXT_NODE = 3
+// var DEBUG = false
+
+module.exports = nanomorph
+
+// Morph one tree into another tree
+//
+// no parent
+//   -> same: diff and walk children
+//   -> not same: replace and return
+// old node doesn't exist
+//   -> insert new node
+// new node doesn't exist
+//   -> delete old node
+// nodes are not the same
+//   -> diff nodes and apply patch to old node
+// nodes are the same
+//   -> walk all child nodes and append to old node
+function nanomorph (oldTree, newTree) {
+  // if (DEBUG) {
+  //   console.log(
+  //   'nanomorph\nold\n  %s\nnew\n  %s',
+  //   oldTree && oldTree.outerHTML,
+  //   newTree && newTree.outerHTML
+  // )
+  // }
+  assert.equal(typeof oldTree, 'object', 'nanomorph: oldTree should be an object')
+  assert.equal(typeof newTree, 'object', 'nanomorph: newTree should be an object')
+  var tree = walk(newTree, oldTree)
+  // if (DEBUG) console.log('=> morphed\n  %s', tree.outerHTML)
+  return tree
+}
+
+// Walk and morph a dom tree
+function walk (newNode, oldNode) {
+  // if (DEBUG) {
+  //   console.log(
+  //   'walk\nold\n  %s\nnew\n  %s',
+  //   oldNode && oldNode.outerHTML,
+  //   newNode && newNode.outerHTML
+  // )
+  // }
+  if (!oldNode) {
+    return newNode
+  } else if (!newNode) {
+    return null
+  } else if (newNode.isSameNode && newNode.isSameNode(oldNode)) {
+    return oldNode
+  } else if (newNode.tagName !== oldNode.tagName) {
+    return newNode
+  } else {
+    morph(newNode, oldNode)
+    updateChildren(newNode, oldNode)
+    return oldNode
+  }
+}
+
+// Update the children of elements
+// (obj, obj) -> null
+function updateChildren (newNode, oldNode) {
+  // if (DEBUG) {
+  //   console.log(
+  //   'updateChildren\nold\n  %s\nnew\n  %s',
+  //   oldNode && oldNode.outerHTML,
+  //   newNode && newNode.outerHTML
+  // )
+  // }
+  var oldChild, newChild, morphed, oldMatch
+
+  // The offset is only ever increased, and used for [i - offset] in the loop
+  var offset = 0
+
+  for (var i = 0; ; i++) {
+    oldChild = oldNode.childNodes[i]
+    newChild = newNode.childNodes[i - offset]
+    // if (DEBUG) {
+    //   console.log(
+    //   '===\n- old\n  %s\n- new\n  %s',
+    //   oldChild && oldChild.outerHTML,
+    //   newChild && newChild.outerHTML
+    // )
+    // }
+    // Both nodes are empty, do nothing
+    if (!oldChild && !newChild) {
+      break
+
+    // There is no new child, remove old
+    } else if (!newChild) {
+      oldNode.removeChild(oldChild)
+      i--
+
+    // There is no old child, add new
+    } else if (!oldChild) {
+      oldNode.appendChild(newChild)
+      offset++
+
+    // Both nodes are the same, morph
+    } else if (same(newChild, oldChild)) {
+      morphed = walk(newChild, oldChild)
+      if (morphed !== oldChild) {
+        oldNode.replaceChild(morphed, oldChild)
+        offset++
+      }
+
+    // Both nodes do not share an ID or a placeholder, try reorder
+    } else {
+      oldMatch = null
+
+      // Try and find a similar node somewhere in the tree
+      for (var j = i; j < oldNode.childNodes.length; j++) {
+        if (same(oldNode.childNodes[j], newChild)) {
+          oldMatch = oldNode.childNodes[j]
+          break
+        }
+      }
+
+      // If there was a node with the same ID or placeholder in the old list
+      if (oldMatch) {
+        morphed = walk(newChild, oldMatch)
+        if (morphed !== oldMatch) offset++
+        oldNode.insertBefore(morphed, oldChild)
+
+      // It's safe to morph two nodes in-place if neither has an ID
+      } else if (!newChild.id && !oldChild.id) {
+        morphed = walk(newChild, oldChild)
+        if (morphed !== oldChild) {
+          oldNode.replaceChild(morphed, oldChild)
+          offset++
+        }
+
+      // Insert the node at the index if we couldn't morph or find a matching node
+      } else {
+        oldNode.insertBefore(newChild, oldChild)
+        offset++
+      }
     }
-    return toEl;
+  }
 }
 
-function morphAttrs(fromNode, toNode) {
-    var attrs = toNode.attributes;
-    var i;
-    var attr;
-    var attrName;
-    var attrNamespaceURI;
-    var attrValue;
-    var fromValue;
+function same (a, b) {
+  if (a.id) return a.id === b.id
+  if (a.isSameNode) return a.isSameNode(b)
+  if (a.tagName !== b.tagName) return false
+  if (a.type === TEXT_NODE) return a.nodeValue === b.nodeValue
+  return false
+}
 
-    for (i = attrs.length - 1; i >= 0; --i) {
-        attr = attrs[i];
-        attrName = attr.name;
-        attrNamespaceURI = attr.namespaceURI;
-        attrValue = attr.value;
+},{"./lib/morph":15,"assert":9}],14:[function(require,module,exports){
+module.exports = [
+  // attribute events (can be set with attributes)
+  'onclick',
+  'ondblclick',
+  'onmousedown',
+  'onmouseup',
+  'onmouseover',
+  'onmousemove',
+  'onmouseout',
+  'onmouseenter',
+  'onmouseleave',
+  'ontouchcancel',
+  'ontouchend',
+  'ontouchmove',
+  'ontouchstart',
+  'ondragstart',
+  'ondrag',
+  'ondragenter',
+  'ondragleave',
+  'ondragover',
+  'ondrop',
+  'ondragend',
+  'onkeydown',
+  'onkeypress',
+  'onkeyup',
+  'onunload',
+  'onabort',
+  'onerror',
+  'onresize',
+  'onscroll',
+  'onselect',
+  'onchange',
+  'onsubmit',
+  'onreset',
+  'onfocus',
+  'onblur',
+  'oninput',
+  // other common events
+  'oncontextmenu',
+  'onfocusin',
+  'onfocusout'
+]
 
-        if (attrNamespaceURI) {
-            attrName = attr.localName || attrName;
-            fromValue = fromNode.getAttributeNS(attrNamespaceURI, attrName);
+},{}],15:[function(require,module,exports){
+var events = require('./events')
+var eventsLength = events.length
 
-            if (fromValue !== attrValue) {
-                fromNode.setAttributeNS(attrNamespaceURI, attrName, attrValue);
-            }
-        } else {
-            fromValue = fromNode.getAttribute(attrName);
+var ELEMENT_NODE = 1
+var TEXT_NODE = 3
+var COMMENT_NODE = 8
 
-            if (fromValue !== attrValue) {
-                fromNode.setAttribute(attrName, attrValue);
-            }
+module.exports = morph
+
+// diff elements and apply the resulting patch to the old node
+// (obj, obj) -> null
+function morph (newNode, oldNode) {
+  var nodeType = newNode.nodeType
+  var nodeName = newNode.nodeName
+
+  if (nodeType === ELEMENT_NODE) {
+    copyAttrs(newNode, oldNode)
+  }
+
+  if (nodeType === TEXT_NODE || nodeType === COMMENT_NODE) {
+    if (oldNode.nodeValue !== newNode.nodeValue) {
+      oldNode.nodeValue = newNode.nodeValue
+    }
+  }
+
+  // Some DOM nodes are weird
+  // https://github.com/patrick-steele-idem/morphdom/blob/master/src/specialElHandlers.js
+  if (nodeName === 'INPUT') updateInput(newNode, oldNode)
+  else if (nodeName === 'OPTION') updateOption(newNode, oldNode)
+  else if (nodeName === 'TEXTAREA') updateTextarea(newNode, oldNode)
+
+  copyEvents(newNode, oldNode)
+}
+
+function copyAttrs (newNode, oldNode) {
+  var oldAttrs = oldNode.attributes
+  var newAttrs = newNode.attributes
+  var attrNamespaceURI = null
+  var attrValue = null
+  var fromValue = null
+  var attrName = null
+  var attr = null
+
+  for (var i = newAttrs.length - 1; i >= 0; --i) {
+    attr = newAttrs[i]
+    attrName = attr.name
+    attrNamespaceURI = attr.namespaceURI
+    attrValue = attr.value
+    if (attrNamespaceURI) {
+      attrName = attr.localName || attrName
+      fromValue = oldNode.getAttributeNS(attrNamespaceURI, attrName)
+      if (fromValue !== attrValue) {
+        oldNode.setAttributeNS(attrNamespaceURI, attrName, attrValue)
+      }
+    } else {
+      if (!oldNode.hasAttribute(attrName)) {
+        oldNode.setAttribute(attrName, attrValue)
+      } else {
+        fromValue = oldNode.getAttribute(attrName)
+        if (fromValue !== attrValue) {
+          // apparently values are always cast to strings, ah well
+          if (attrValue === 'null' || attrValue === 'undefined') {
+            oldNode.removeAttribute(attrName)
+          } else {
+            oldNode.setAttribute(attrName, attrValue)
+          }
         }
+      }
+    }
+  }
+
+  // Remove any extra attributes found on the original DOM element that
+  // weren't found on the target element.
+  for (var j = oldAttrs.length - 1; j >= 0; --j) {
+    attr = oldAttrs[j]
+    if (attr.specified !== false) {
+      attrName = attr.name
+      attrNamespaceURI = attr.namespaceURI
+
+      if (attrNamespaceURI) {
+        attrName = attr.localName || attrName
+        if (!newNode.hasAttributeNS(attrNamespaceURI, attrName)) {
+          oldNode.removeAttributeNS(attrNamespaceURI, attrName)
+        }
+      } else {
+        if (!newNode.hasAttributeNS(null, attrName)) {
+          oldNode.removeAttribute(attrName)
+        }
+      }
+    }
+  }
+}
+
+function copyEvents (newNode, oldNode) {
+  for (var i = 0; i < eventsLength; i++) {
+    var ev = events[i]
+    if (newNode[ev]) {           // if new element has a whitelisted attribute
+      oldNode[ev] = newNode[ev]  // update existing element
+    } else if (oldNode[ev]) {    // if existing element has it and new one doesnt
+      oldNode[ev] = undefined    // remove it from existing element
+    }
+  }
+}
+
+function updateOption (newNode, oldNode) {
+  updateAttribute(newNode, oldNode, 'selected')
+}
+
+// The "value" attribute is special for the <input> element since it sets the
+// initial value. Changing the "value" attribute without changing the "value"
+// property will have no effect since it is only used to the set the initial
+// value. Similar for the "checked" attribute, and "disabled".
+function updateInput (newNode, oldNode) {
+  var newValue = newNode.value
+  var oldValue = oldNode.value
+
+  updateAttribute(newNode, oldNode, 'checked')
+  updateAttribute(newNode, oldNode, 'disabled')
+
+  if (newValue !== oldValue) {
+    oldNode.setAttribute('value', newValue)
+    oldNode.value = newValue
+  }
+
+  if (newValue === 'null') {
+    oldNode.value = ''
+    oldNode.removeAttribute('value')
+  }
+
+  if (!newNode.hasAttributeNS(null, 'value')) {
+    oldNode.removeAttribute('value')
+  } else if (oldNode.type === 'range') {
+    // this is so elements like slider move their UI thingy
+    oldNode.value = newValue
+  }
+}
+
+function updateTextarea (newNode, oldNode) {
+  var newValue = newNode.value
+  if (newValue !== oldNode.value) {
+    oldNode.value = newValue
+  }
+
+  if (oldNode.firstChild && oldNode.firstChild.nodeValue !== newValue) {
+    // Needed for IE. Apparently IE sets the placeholder as the
+    // node value and vise versa. This ignores an empty update.
+    if (newValue === '' && oldNode.firstChild.nodeValue === oldNode.placeholder) {
+      return
     }
 
-    // Remove any extra attributes found on the original DOM element that
-    // weren't found on the target element.
-    attrs = fromNode.attributes;
+    oldNode.firstChild.nodeValue = newValue
+  }
+}
 
-    for (i = attrs.length - 1; i >= 0; --i) {
-        attr = attrs[i];
-        if (attr.specified !== false) {
-            attrName = attr.name;
-            attrNamespaceURI = attr.namespaceURI;
-
-            if (attrNamespaceURI) {
-                attrName = attr.localName || attrName;
-
-                if (!hasAttributeNS(toNode, attrNamespaceURI, attrName)) {
-                    fromNode.removeAttributeNS(attrNamespaceURI, attrName);
-                }
-            } else {
-                if (!hasAttributeNS(toNode, null, attrName)) {
-                    fromNode.removeAttribute(attrName);
-                }
-            }
-        }
+function updateAttribute (newNode, oldNode, name) {
+  if (newNode[name] !== oldNode[name]) {
+    oldNode[name] = newNode[name]
+    if (newNode[name]) {
+      oldNode.setAttribute(name, '')
+    } else {
+      oldNode.removeAttribute(name)
     }
+  }
 }
 
-function syncBooleanAttrProp(fromEl, toEl, name) {
-    if (fromEl[name] !== toEl[name]) {
-        fromEl[name] = toEl[name];
-        if (fromEl[name]) {
-            fromEl.setAttribute(name, '');
-        } else {
-            fromEl.removeAttribute(name, '');
-        }
-    }
+},{"./events":14}],16:[function(require,module,exports){
+var reg = new RegExp('([^?=&]+)(=([^&]*))?', 'g')
+var assert = require('assert')
+
+module.exports = qs
+
+function qs (url) {
+  assert.equal(typeof url, 'string', 'nanoquery: url should be type string')
+  assert.ok(typeof window !== 'undefined', 'nanoquery: expected window to exist')
+
+  var obj = {}
+  url.replace(/^.*\?/, '').replace(reg, function (a0, a1, a2, a3) {
+    obj[window.decodeURIComponent(a1)] = window.decodeURIComponent(a3)
+  })
+
+  return obj
 }
 
-var specialElHandlers = {
-    /**
-     * Needed for IE. Apparently IE doesn't think that "selected" is an
-     * attribute when reading over the attributes using selectEl.attributes
-     */
-    OPTION: function(fromEl, toEl) {
-        syncBooleanAttrProp(fromEl, toEl, 'selected');
-    },
-    /**
-     * The "value" attribute is special for the <input> element since it sets
-     * the initial value. Changing the "value" attribute without changing the
-     * "value" property will have no effect since it is only used to the set the
-     * initial value.  Similar for the "checked" attribute, and "disabled".
-     */
-    INPUT: function(fromEl, toEl) {
-        syncBooleanAttrProp(fromEl, toEl, 'checked');
-        syncBooleanAttrProp(fromEl, toEl, 'disabled');
+},{"assert":1}],17:[function(require,module,exports){
+'use strict'
 
-        if (fromEl.value !== toEl.value) {
-            fromEl.value = toEl.value;
-        }
-
-        if (!hasAttributeNS(toEl, null, 'value')) {
-            fromEl.removeAttribute('value');
-        }
-    },
-
-    TEXTAREA: function(fromEl, toEl) {
-        var newValue = toEl.value;
-        if (fromEl.value !== newValue) {
-            fromEl.value = newValue;
-        }
-
-        if (fromEl.firstChild) {
-            // Needed for IE. Apparently IE sets the placeholder as the
-            // node value and vise versa. This ignores an empty update.
-            if (newValue === '' && fromEl.firstChild.nodeValue === fromEl.placeholder) {
-                return;
-            }
-
-            fromEl.firstChild.nodeValue = newValue;
-        }
-    },
-    SELECT: function(fromEl, toEl) {
-        if (!hasAttributeNS(toEl, null, 'multiple')) {
-            var selectedIndex = -1;
-            var i = 0;
-            var curChild = toEl.firstChild;
-            while(curChild) {
-                var nodeName = curChild.nodeName;
-                if (nodeName && nodeName.toUpperCase() === 'OPTION') {
-                    if (hasAttributeNS(curChild, null, 'selected')) {
-                        selectedIndex = i;
-                        break;
-                    }
-                    i++;
-                }
-                curChild = curChild.nextSibling;
-            }
-
-            fromEl.selectedIndex = i;
-        }
-    }
-};
-
-var ELEMENT_NODE = 1;
-var TEXT_NODE = 3;
-var COMMENT_NODE = 8;
-
-function noop() {}
-
-function defaultGetNodeKey(node) {
-    return node.id;
-}
-
-function morphdomFactory(morphAttrs) {
-
-    return function morphdom(fromNode, toNode, options) {
-        if (!options) {
-            options = {};
-        }
-
-        if (typeof toNode === 'string') {
-            if (fromNode.nodeName === '#document' || fromNode.nodeName === 'HTML') {
-                var toNodeHtml = toNode;
-                toNode = doc.createElement('html');
-                toNode.innerHTML = toNodeHtml;
-            } else {
-                toNode = toElement(toNode);
-            }
-        }
-
-        var getNodeKey = options.getNodeKey || defaultGetNodeKey;
-        var onBeforeNodeAdded = options.onBeforeNodeAdded || noop;
-        var onNodeAdded = options.onNodeAdded || noop;
-        var onBeforeElUpdated = options.onBeforeElUpdated || noop;
-        var onElUpdated = options.onElUpdated || noop;
-        var onBeforeNodeDiscarded = options.onBeforeNodeDiscarded || noop;
-        var onNodeDiscarded = options.onNodeDiscarded || noop;
-        var onBeforeElChildrenUpdated = options.onBeforeElChildrenUpdated || noop;
-        var childrenOnly = options.childrenOnly === true;
-
-        // This object is used as a lookup to quickly find all keyed elements in the original DOM tree.
-        var fromNodesLookup = {};
-        var keyedRemovalList;
-
-        function addKeyedRemoval(key) {
-            if (keyedRemovalList) {
-                keyedRemovalList.push(key);
-            } else {
-                keyedRemovalList = [key];
-            }
-        }
-
-        function walkDiscardedChildNodes(node, skipKeyedNodes) {
-            if (node.nodeType === ELEMENT_NODE) {
-                var curChild = node.firstChild;
-                while (curChild) {
-
-                    var key = undefined;
-
-                    if (skipKeyedNodes && (key = getNodeKey(curChild))) {
-                        // If we are skipping keyed nodes then we add the key
-                        // to a list so that it can be handled at the very end.
-                        addKeyedRemoval(key);
-                    } else {
-                        // Only report the node as discarded if it is not keyed. We do this because
-                        // at the end we loop through all keyed elements that were unmatched
-                        // and then discard them in one final pass.
-                        onNodeDiscarded(curChild);
-                        if (curChild.firstChild) {
-                            walkDiscardedChildNodes(curChild, skipKeyedNodes);
-                        }
-                    }
-
-                    curChild = curChild.nextSibling;
-                }
-            }
-        }
-
-        /**
-         * Removes a DOM node out of the original DOM
-         *
-         * @param  {Node} node The node to remove
-         * @param  {Node} parentNode The nodes parent
-         * @param  {Boolean} skipKeyedNodes If true then elements with keys will be skipped and not discarded.
-         * @return {undefined}
-         */
-        function removeNode(node, parentNode, skipKeyedNodes) {
-            if (onBeforeNodeDiscarded(node) === false) {
-                return;
-            }
-
-            if (parentNode) {
-                parentNode.removeChild(node);
-            }
-
-            onNodeDiscarded(node);
-            walkDiscardedChildNodes(node, skipKeyedNodes);
-        }
-
-        // // TreeWalker implementation is no faster, but keeping this around in case this changes in the future
-        // function indexTree(root) {
-        //     var treeWalker = document.createTreeWalker(
-        //         root,
-        //         NodeFilter.SHOW_ELEMENT);
-        //
-        //     var el;
-        //     while((el = treeWalker.nextNode())) {
-        //         var key = getNodeKey(el);
-        //         if (key) {
-        //             fromNodesLookup[key] = el;
-        //         }
-        //     }
-        // }
-
-        // // NodeIterator implementation is no faster, but keeping this around in case this changes in the future
-        //
-        // function indexTree(node) {
-        //     var nodeIterator = document.createNodeIterator(node, NodeFilter.SHOW_ELEMENT);
-        //     var el;
-        //     while((el = nodeIterator.nextNode())) {
-        //         var key = getNodeKey(el);
-        //         if (key) {
-        //             fromNodesLookup[key] = el;
-        //         }
-        //     }
-        // }
-
-        function indexTree(node) {
-            if (node.nodeType === ELEMENT_NODE) {
-                var curChild = node.firstChild;
-                while (curChild) {
-                    var key = getNodeKey(curChild);
-                    if (key) {
-                        fromNodesLookup[key] = curChild;
-                    }
-
-                    // Walk recursively
-                    indexTree(curChild);
-
-                    curChild = curChild.nextSibling;
-                }
-            }
-        }
-
-        indexTree(fromNode);
-
-        function handleNodeAdded(el) {
-            onNodeAdded(el);
-
-            var curChild = el.firstChild;
-            while (curChild) {
-                var nextSibling = curChild.nextSibling;
-
-                var key = getNodeKey(curChild);
-                if (key) {
-                    var unmatchedFromEl = fromNodesLookup[key];
-                    if (unmatchedFromEl && compareNodeNames(curChild, unmatchedFromEl)) {
-                        curChild.parentNode.replaceChild(unmatchedFromEl, curChild);
-                        morphEl(unmatchedFromEl, curChild);
-                    }
-                }
-
-                handleNodeAdded(curChild);
-                curChild = nextSibling;
-            }
-        }
-
-        function morphEl(fromEl, toEl, childrenOnly) {
-            var toElKey = getNodeKey(toEl);
-            var curFromNodeKey;
-
-            if (toElKey) {
-                // If an element with an ID is being morphed then it is will be in the final
-                // DOM so clear it out of the saved elements collection
-                delete fromNodesLookup[toElKey];
-            }
-
-            if (toNode.isSameNode && toNode.isSameNode(fromNode)) {
-                return;
-            }
-
-            if (!childrenOnly) {
-                if (onBeforeElUpdated(fromEl, toEl) === false) {
-                    return;
-                }
-
-                morphAttrs(fromEl, toEl);
-                onElUpdated(fromEl);
-
-                if (onBeforeElChildrenUpdated(fromEl, toEl) === false) {
-                    return;
-                }
-            }
-
-            if (fromEl.nodeName !== 'TEXTAREA') {
-                var curToNodeChild = toEl.firstChild;
-                var curFromNodeChild = fromEl.firstChild;
-                var curToNodeKey;
-
-                var fromNextSibling;
-                var toNextSibling;
-                var matchingFromEl;
-
-                outer: while (curToNodeChild) {
-                    toNextSibling = curToNodeChild.nextSibling;
-                    curToNodeKey = getNodeKey(curToNodeChild);
-
-                    while (curFromNodeChild) {
-                        fromNextSibling = curFromNodeChild.nextSibling;
-
-                        if (curToNodeChild.isSameNode && curToNodeChild.isSameNode(curFromNodeChild)) {
-                            curToNodeChild = toNextSibling;
-                            curFromNodeChild = fromNextSibling;
-                            continue outer;
-                        }
-
-                        curFromNodeKey = getNodeKey(curFromNodeChild);
-
-                        var curFromNodeType = curFromNodeChild.nodeType;
-
-                        var isCompatible = undefined;
-
-                        if (curFromNodeType === curToNodeChild.nodeType) {
-                            if (curFromNodeType === ELEMENT_NODE) {
-                                // Both nodes being compared are Element nodes
-
-                                if (curToNodeKey) {
-                                    // The target node has a key so we want to match it up with the correct element
-                                    // in the original DOM tree
-                                    if (curToNodeKey !== curFromNodeKey) {
-                                        // The current element in the original DOM tree does not have a matching key so
-                                        // let's check our lookup to see if there is a matching element in the original
-                                        // DOM tree
-                                        if ((matchingFromEl = fromNodesLookup[curToNodeKey])) {
-                                            if (curFromNodeChild.nextSibling === matchingFromEl) {
-                                                // Special case for single element removals. To avoid removing the original
-                                                // DOM node out of the tree (since that can break CSS transitions, etc.),
-                                                // we will instead discard the current node and wait until the next
-                                                // iteration to properly match up the keyed target element with its matching
-                                                // element in the original tree
-                                                isCompatible = false;
-                                            } else {
-                                                // We found a matching keyed element somewhere in the original DOM tree.
-                                                // Let's moving the original DOM node into the current position and morph
-                                                // it.
-
-                                                // NOTE: We use insertBefore instead of replaceChild because we want to go through
-                                                // the `removeNode()` function for the node that is being discarded so that
-                                                // all lifecycle hooks are correctly invoked
-                                                fromEl.insertBefore(matchingFromEl, curFromNodeChild);
-
-                                                fromNextSibling = curFromNodeChild.nextSibling;
-
-                                                if (curFromNodeKey) {
-                                                    // Since the node is keyed it might be matched up later so we defer
-                                                    // the actual removal to later
-                                                    addKeyedRemoval(curFromNodeKey);
-                                                } else {
-                                                    // NOTE: we skip nested keyed nodes from being removed since there is
-                                                    //       still a chance they will be matched up later
-                                                    removeNode(curFromNodeChild, fromEl, true /* skip keyed nodes */);
-                                                }
-
-                                                curFromNodeChild = matchingFromEl;
-                                            }
-                                        } else {
-                                            // The nodes are not compatible since the "to" node has a key and there
-                                            // is no matching keyed node in the source tree
-                                            isCompatible = false;
-                                        }
-                                    }
-                                } else if (curFromNodeKey) {
-                                    // The original has a key
-                                    isCompatible = false;
-                                }
-
-                                isCompatible = isCompatible !== false && compareNodeNames(curFromNodeChild, curToNodeChild);
-                                if (isCompatible) {
-                                    // We found compatible DOM elements so transform
-                                    // the current "from" node to match the current
-                                    // target DOM node.
-                                    morphEl(curFromNodeChild, curToNodeChild);
-                                }
-
-                            } else if (curFromNodeType === TEXT_NODE || curFromNodeType == COMMENT_NODE) {
-                                // Both nodes being compared are Text or Comment nodes
-                                isCompatible = true;
-                                // Simply update nodeValue on the original node to
-                                // change the text value
-                                curFromNodeChild.nodeValue = curToNodeChild.nodeValue;
-                            }
-                        }
-
-                        if (isCompatible) {
-                            // Advance both the "to" child and the "from" child since we found a match
-                            curToNodeChild = toNextSibling;
-                            curFromNodeChild = fromNextSibling;
-                            continue outer;
-                        }
-
-                        // No compatible match so remove the old node from the DOM and continue trying to find a
-                        // match in the original DOM. However, we only do this if the from node is not keyed
-                        // since it is possible that a keyed node might match up with a node somewhere else in the
-                        // target tree and we don't want to discard it just yet since it still might find a
-                        // home in the final DOM tree. After everything is done we will remove any keyed nodes
-                        // that didn't find a home
-                        if (curFromNodeKey) {
-                            // Since the node is keyed it might be matched up later so we defer
-                            // the actual removal to later
-                            addKeyedRemoval(curFromNodeKey);
-                        } else {
-                            // NOTE: we skip nested keyed nodes from being removed since there is
-                            //       still a chance they will be matched up later
-                            removeNode(curFromNodeChild, fromEl, true /* skip keyed nodes */);
-                        }
-
-                        curFromNodeChild = fromNextSibling;
-                    }
-
-                    // If we got this far then we did not find a candidate match for
-                    // our "to node" and we exhausted all of the children "from"
-                    // nodes. Therefore, we will just append the current "to" node
-                    // to the end
-                    if (curToNodeKey && (matchingFromEl = fromNodesLookup[curToNodeKey]) && compareNodeNames(matchingFromEl, curToNodeChild)) {
-                        fromEl.appendChild(matchingFromEl);
-                        morphEl(matchingFromEl, curToNodeChild);
-                    } else {
-                        var onBeforeNodeAddedResult = onBeforeNodeAdded(curToNodeChild);
-                        if (onBeforeNodeAddedResult !== false) {
-                            if (onBeforeNodeAddedResult) {
-                                curToNodeChild = onBeforeNodeAddedResult;
-                            }
-
-                            if (curToNodeChild.actualize) {
-                                curToNodeChild = curToNodeChild.actualize(fromEl.ownerDocument || doc);
-                            }
-                            fromEl.appendChild(curToNodeChild);
-                            handleNodeAdded(curToNodeChild);
-                        }
-                    }
-
-                    curToNodeChild = toNextSibling;
-                    curFromNodeChild = fromNextSibling;
-                }
-
-                // We have processed all of the "to nodes". If curFromNodeChild is
-                // non-null then we still have some from nodes left over that need
-                // to be removed
-                while (curFromNodeChild) {
-                    fromNextSibling = curFromNodeChild.nextSibling;
-                    if ((curFromNodeKey = getNodeKey(curFromNodeChild))) {
-                        // Since the node is keyed it might be matched up later so we defer
-                        // the actual removal to later
-                        addKeyedRemoval(curFromNodeKey);
-                    } else {
-                        // NOTE: we skip nested keyed nodes from being removed since there is
-                        //       still a chance they will be matched up later
-                        removeNode(curFromNodeChild, fromEl, true /* skip keyed nodes */);
-                    }
-                    curFromNodeChild = fromNextSibling;
-                }
-            }
-
-            var specialElHandler = specialElHandlers[fromEl.nodeName];
-            if (specialElHandler) {
-                specialElHandler(fromEl, toEl);
-            }
-        } // END: morphEl(...)
-
-        var morphedNode = fromNode;
-        var morphedNodeType = morphedNode.nodeType;
-        var toNodeType = toNode.nodeType;
-
-        if (!childrenOnly) {
-            // Handle the case where we are given two DOM nodes that are not
-            // compatible (e.g. <div> --> <span> or <div> --> TEXT)
-            if (morphedNodeType === ELEMENT_NODE) {
-                if (toNodeType === ELEMENT_NODE) {
-                    if (!compareNodeNames(fromNode, toNode)) {
-                        onNodeDiscarded(fromNode);
-                        morphedNode = moveChildren(fromNode, createElementNS(toNode.nodeName, toNode.namespaceURI));
-                    }
-                } else {
-                    // Going from an element node to a text node
-                    morphedNode = toNode;
-                }
-            } else if (morphedNodeType === TEXT_NODE || morphedNodeType === COMMENT_NODE) { // Text or comment node
-                if (toNodeType === morphedNodeType) {
-                    morphedNode.nodeValue = toNode.nodeValue;
-                    return morphedNode;
-                } else {
-                    // Text node to something else
-                    morphedNode = toNode;
-                }
-            }
-        }
-
-        if (morphedNode === toNode) {
-            // The "to node" was not compatible with the "from node" so we had to
-            // toss out the "from node" and use the "to node"
-            onNodeDiscarded(fromNode);
-        } else {
-            morphEl(morphedNode, toNode, childrenOnly);
-
-            // We now need to loop over any keyed nodes that might need to be
-            // removed. We only do the removal if we know that the keyed node
-            // never found a match. When a keyed node is matched up we remove
-            // it out of fromNodesLookup and we use fromNodesLookup to determine
-            // if a keyed node has been matched up or not
-            if (keyedRemovalList) {
-                for (var i=0, len=keyedRemovalList.length; i<len; i++) {
-                    var elToRemove = fromNodesLookup[keyedRemovalList[i]];
-                    if (elToRemove) {
-                        removeNode(elToRemove, elToRemove.parentNode, false);
-                    }
-                }
-            }
-        }
-
-        if (!childrenOnly && morphedNode !== fromNode && fromNode.parentNode) {
-            if (morphedNode.actualize) {
-                morphedNode = morphedNode.actualize(fromNode.ownerDocument || doc);
-            }
-            // If we had to swap out the from node with a new node because the old
-            // node was not compatible with the target node then we need to
-            // replace the old DOM node in the original DOM tree. This is only
-            // possible if the original DOM node was part of a DOM tree which
-            // we know is the case if it has a parent node.
-            fromNode.parentNode.replaceChild(morphedNode, fromNode);
-        }
-
-        return morphedNode;
-    };
-}
-
-var morphdom = morphdomFactory(morphAttrs);
-
-module.exports = morphdom;
-
-},{}],14:[function(require,module,exports){
-var window = require('global/window')
 var assert = require('assert')
 
 module.exports = nanoraf
@@ -2370,188 +2050,36 @@ function nanoraf (render, raf) {
   assert.equal(typeof render, 'function', 'nanoraf: render should be a function')
   assert.ok(typeof raf === 'function' || typeof raf === 'undefined', 'nanoraf: raf should be a function or undefined')
 
-  raf = raf || window.requestAnimationFrame
-
-  var inRenderingTransaction = false
+  if (!raf) raf = window.requestAnimationFrame
   var redrawScheduled = false
-  var currentState = null
+  var args = null
 
-  // pass new state to be rendered
-  // (obj, obj?) -> null
-  return function frame (state, prev) {
-    assert.equal(typeof state, 'object', 'nanoraf: state should be an object')
-    assert.equal(typeof prev, 'object', 'nanoraf: prev should be an object')
-    assert.equal(inRenderingTransaction, false, 'nanoraf: new frame was created before previous frame finished')
-
-    // request a redraw for next frame
-    if (currentState === null && !redrawScheduled) {
+  return function frame () {
+    if (args === null && !redrawScheduled) {
       redrawScheduled = true
 
       raf(function redraw () {
         redrawScheduled = false
-        if (!currentState) return
 
-        inRenderingTransaction = true
-        render(currentState, prev)
-        inRenderingTransaction = false
+        var length = args.length
+        var _args = new Array(length)
+        for (var i = 0; i < length; i++) _args[i] = args[i]
 
-        currentState = null
+        render.apply(render, _args)
+        args = null
       })
     }
 
-    // update data for redraw
-    currentState = state
+    args = arguments
   }
 }
 
-},{"assert":1,"global/window":10}],15:[function(require,module,exports){
-/* eslint-disable no-eval */
-var assert = require('assert')
+},{"assert":1}],18:[function(require,module,exports){
+var wayfarer = require('wayfarer')
 
-module.exports = nanotick
-var delay = (typeof window !== 'undefined' && window.document)
-  ? (typeof setImmediate !== 'undefined')
-    ? setImmediate
-    : setTimeout
-  : eval('process.nextTick')
+var isLocalFile = (/file:\/\//.test(typeof window === 'object' &&
+  window.location && window.location.origin)) // electron support
 
-// Process.nextTick() batching ulity
-// null -> fn(any) -> fn(any)
-function nanotick () {
-  var callbacks = []
-  var interval = false
-
-  return function tick (cb) {
-    assert.equal(typeof cb, 'function', 'nanotick.tick: cb should be a function')
-
-    var isAsync = false
-
-    executeAsync(function () {
-      isAsync = true
-    })
-
-    return function wrappedTick () {
-      var length = arguments.length
-      var args = []
-      for (var i = 0; i < length; i++) {
-        args.push[arguments[i]]
-      }
-
-      if (isAsync) {
-        cb.apply(cb, args)
-      } else {
-        executeAsync(function () {
-          cb.apply(cb, args)
-        })
-      }
-    }
-  }
-
-  function executeAsync (cb) {
-    callbacks.push(cb)
-
-    if (!interval) {
-      interval = true
-      delay(function () {
-        while (callbacks.length > 0) {
-          callbacks.shift()()
-        }
-        interval = false
-      })
-    }
-  }
-}
-
-},{"assert":1}],16:[function(require,module,exports){
-/* global MutationObserver */
-var document = require('global/document')
-var window = require('global/window')
-var watch = Object.create(null)
-var KEY_ID = 'onloadid' + (new Date() % 9e6).toString(36)
-var KEY_ATTR = 'data-' + KEY_ID
-var INDEX = 0
-
-if (window && window.MutationObserver) {
-  var observer = new MutationObserver(function (mutations) {
-    if (Object.keys(watch).length < 1) return
-    for (var i = 0; i < mutations.length; i++) {
-      if (mutations[i].attributeName === KEY_ATTR) {
-        eachAttr(mutations[i], turnon, turnoff)
-        continue
-      }
-      eachMutation(mutations[i].removedNodes, turnoff)
-      eachMutation(mutations[i].addedNodes, turnon)
-    }
-  })
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeOldValue: true,
-    attributeFilter: [KEY_ATTR]
-  })
-}
-
-module.exports = function onload (el, on, off, caller) {
-  on = on || function () {}
-  off = off || function () {}
-  el.setAttribute(KEY_ATTR, 'o' + INDEX)
-  watch['o' + INDEX] = [on, off, 0, caller || onload.caller]
-  INDEX += 1
-  return el
-}
-
-function turnon (index, el) {
-  if (watch[index][0] && watch[index][2] === 0) {
-    watch[index][0](el)
-    watch[index][2] = 1
-  }
-}
-
-function turnoff (index, el) {
-  if (watch[index][1] && watch[index][2] === 1) {
-    watch[index][1](el)
-    watch[index][2] = 0
-  }
-}
-
-function eachAttr (mutation, on, off) {
-  var newValue = mutation.target.getAttribute(KEY_ATTR)
-  if (sameOrigin(mutation.oldValue, newValue)) {
-    watch[newValue] = watch[mutation.oldValue]
-    return
-  }
-  if (watch[mutation.oldValue]) {
-    off(mutation.oldValue, mutation.target)
-  }
-  if (watch[newValue]) {
-    on(newValue, mutation.target)
-  }
-}
-
-function sameOrigin (oldValue, newValue) {
-  if (!oldValue || !newValue) return false
-  return watch[oldValue][3] === watch[newValue][3]
-}
-
-function eachMutation (nodes, fn) {
-  var keys = Object.keys(watch)
-  for (var i = 0; i < nodes.length; i++) {
-    if (nodes[i] && nodes[i].getAttribute && nodes[i].getAttribute(KEY_ATTR)) {
-      var onloadid = nodes[i].getAttribute(KEY_ATTR)
-      keys.forEach(function (k) {
-        if (onloadid === k) {
-          fn(k, nodes[i])
-        }
-      })
-    }
-    if (nodes[i].childNodes.length > 0) {
-      eachMutation(nodes[i].childNodes, fn)
-    }
-  }
-}
-
-},{"global/document":9,"global/window":10}],17:[function(require,module,exports){
 /* eslint-disable no-useless-escape */
 var electron = '^(file:\/\/|\/)(.*\.html?\/?)?'
 var protocol = '^(http(s)?(:\/\/))?(www\.)?'
@@ -2564,274 +2092,165 @@ var prefix = new RegExp(protocol + domain)
 var normalize = new RegExp('#')
 var suffix = new RegExp(qs)
 
-module.exports = pathname
+module.exports = Nanorouter
+
+function Nanorouter (opts) {
+  opts = opts || {}
+
+  var router = wayfarer(opts.default || '/404')
+  var curry = opts.curry || false
+  var prevCallback = null
+  var prevRoute = null
+
+  emit.router = router
+  emit.on = on
+  return emit
+
+  function on (routename, listener) {
+    routename = routename.replace(/^[#/]/, '')
+    router.on(routename, listener)
+  }
+
+  function emit (route) {
+    if (!curry) {
+      return router(route)
+    } else {
+      route = pathname(route, isLocalFile)
+      if (route === prevRoute) {
+        return prevCallback()
+      } else {
+        prevRoute = route
+        prevCallback = router(route)
+        return prevCallback()
+      }
+    }
+  }
+}
 
 // replace everything in a route but the pathname and hash
-// TODO(yw): ditch 'suffix' and allow qs routing
-// (str, bool) -> str
 function pathname (route, isElectron) {
   if (isElectron) route = route.replace(stripElectron, '')
   else route = route.replace(prefix, '')
   return route.replace(suffix, '').replace(normalize, '/')
 }
 
-},{}],18:[function(require,module,exports){
-var document = require('global/document')
-var assert = require('assert')
-var xtend = require('xtend')
-
-var qs = require('./qs')
-
-module.exports = createLocation
-
-// takes an initial representation of the location state
-// and then synchronize a mutation across all fields
-//
-// scenarios:
-// - create a state object from document.location; we got no state yet
-// - create a new state object from a string we pass in; full override mode
-// - patch a state object with some value we pass in - lil patchy stuff
-//
-// (obj?, str?) -> obj
-function createLocation (state, patch) {
-  if (!state) {
-    return {
-      pathname: document.location.pathname,
-      search: (document.location.search) ? qs(document.location.search) : {},
-      hash: document.location.hash,
-      href: document.location.href
-    }
-  } else {
-    assert.equal(typeof state, 'object', 'sheet-router/create-location: state should be an object')
-    if (typeof patch === 'string') {
-      return parseUrl(patch)
-    } else {
-      assert.equal(typeof patch, 'object', 'sheet-router/create-location: patch should be an object')
-      return xtend(state, patch)
-    }
-  }
-
-  // parse a URL into a kv object inside the browser
-  // str -> obj
-  function parseUrl (url) {
-    var a = document.createElement('a')
-    a.href = url
-
-    return {
-      href: a.href,
-      pathname: a.pathname,
-      search: (a.search) ? qs(a.search) : {},
-      hash: a.hash
-    }
-  }
-}
-
-},{"./qs":22,"assert":1,"global/document":9,"xtend":31}],19:[function(require,module,exports){
-var document = require('global/document')
-var window = require('global/window')
+},{"wayfarer":26}],19:[function(require,module,exports){
+var onIdle = require('on-idle')
 var assert = require('assert')
 
-module.exports = history
+var perf
+var disabled = true
+try {
+  perf = window.performance
+  disabled = window.localStorage.DISABLE_NANOTIMING === 'true' || !perf.mark
+} catch (e) { }
 
-// listen to html5 pushstate events
-// and update router accordingly
-// fn(str) -> null
-function history (cb) {
-  assert.equal(typeof cb, 'function', 'sheet-router/history: cb must be a function')
-  window.onpopstate = function () {
-    cb({
-      pathname: document.location.pathname,
-      search: document.location.search,
-      href: document.location.href,
-      hash: document.location.hash
+module.exports = nanotiming
+
+function nanotiming (name) {
+  assert.equal(typeof name, 'string', 'nanotiming: name should be type string')
+
+  if (disabled) return noop
+
+  var uuid = (perf.now() * 100).toFixed()
+  var startName = 'start-' + uuid + '-' + name
+  perf.mark(startName)
+
+  function end (cb) {
+    var endName = 'end-' + uuid + '-' + name
+    perf.mark(endName)
+
+    onIdle(function () {
+      var measureName = name + ' [' + uuid + ']'
+      perf.measure(measureName, startName, endName)
+      perf.clearMarks(startName)
+      perf.clearMarks(endName)
+      if (cb) cb(name)
     })
   }
+
+  end.uuid = uuid
+  return end
 }
 
-},{"assert":1,"global/document":9,"global/window":10}],20:[function(require,module,exports){
-var window = require('global/window')
+function noop (cb) {
+  if (cb) onIdle(cb)
+}
+
+},{"assert":1,"on-idle":20}],20:[function(require,module,exports){
 var assert = require('assert')
 
-var qs = require('./qs')
+var dftOpts = {}
+var hasWindow = typeof window !== 'undefined'
+var hasIdle = hasWindow && window.requestIdleCallback
 
-module.exports = href
+module.exports = onIdle
 
-var noRoutingAttrName = 'data-no-routing'
+function onIdle (cb, opts) {
+  opts = opts || dftOpts
+  var timerId
 
-// handle a click if is anchor tag with an href
-// and url lives on the same domain. Replaces
-// trailing '#' so empty links work as expected.
-// (fn(str), obj?) -> undefined
-function href (cb, root) {
-  assert.equal(typeof cb, 'function', 'sheet-router/href: cb must be a function')
+  assert.equal(typeof cb, 'function', 'on-idle: cb should be type function')
+  assert.equal(typeof opts, 'object', 'on-idle: opts should be type object')
 
-  window.onclick = function (e) {
-    if ((e.button && e.button !== 0) || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return
-
-    var node = (function traverse (node) {
-      if (!node || node === root) return
-      if (node.localName !== 'a') return traverse(node.parentNode)
-      if (node.href === undefined) return traverse(node.parentNode)
-      if (window.location.host !== node.host) return traverse(node.parentNode)
-      return node
-    })(e.target)
-
-    if (!node) return
-
-    var isRoutingDisabled = node.hasAttribute(noRoutingAttrName)
-    if (isRoutingDisabled) return
-
-    e.preventDefault()
-    cb({
-      pathname: node.pathname,
-      search: (node.search) ? qs(node.search) : {},
-      href: node.href,
-      hash: node.hash
-    })
+  if (hasIdle) {
+    timerId = window.requestIdleCallback(function (idleDeadline) {
+      if (idleDeadline.timeRemaining() <= 10 && !idleDeadline.didTimeout) {
+        return onIdle(cb, opts)
+      } else {
+        cb(idleDeadline)
+      }
+    }, opts)
+    return window.cancelIdleCallback.bind(window, timerId)
+  } else if (hasWindow) {
+    timerId = setTimeout(cb, 0)
+    return clearTimeout.bind(window, timerId)
   }
 }
 
-},{"./qs":22,"assert":1,"global/window":10}],21:[function(require,module,exports){
-var pathname = require('./_pathname')
-var wayfarer = require('wayfarer')
-var assert = require('assert')
+},{"assert":1}],21:[function(require,module,exports){
+'use strict'
 
-var isLocalFile = (/file:\/\//.test(typeof window === 'object' &&
-  window.location && window.location.origin)) // electron support
+/**
+ * Remove a range of items from an array
+ *
+ * @function removeItems
+ * @param {Array<*>} arr The target array
+ * @param {number} startIdx The index to begin removing from (inclusive)
+ * @param {number} removeCount How many items to remove
+ */
+module.exports = function removeItems(arr, startIdx, removeCount)
+{
+  var i, length = arr.length
 
-module.exports = sheetRouter
-
-// Fast, modular client router
-// fn(str, any[..]) -> fn(str, any[..])
-function sheetRouter (opts, tree) {
-  if (!tree) {
-    tree = opts
-    opts = {}
+  if (startIdx >= length || removeCount === 0) {
+    return
   }
 
-  assert.equal(typeof opts, 'object', 'sheet-router: opts must be a object')
-  assert.ok(Array.isArray(tree), 'sheet-router: tree must be an array')
+  removeCount = (startIdx + removeCount > length ? length - startIdx : removeCount)
 
-  var dft = opts.default || '/404'
-  assert.equal(typeof dft, 'string', 'sheet-router: dft must be a string')
+  var len = length - removeCount
 
-  var router = wayfarer(dft)
-  var prevCallback = null
-  var prevRoute = null
+  for (i = startIdx; i < len; ++i) {
+    arr[i] = arr[i + removeCount]
+  }
 
-  match._router = router
+  arr.length = len
+}
 
-  // register tree in router
-  // tree[0] is a string, thus a route
-  // tree[0] is an array, thus not a route
-  // tree[1] is a function
-    // tree[2] is an array
-    // tree[2] is not an array
-  // tree[1] is an array
-  ;(function walk (tree, fullRoute) {
-    if (typeof tree[0] === 'string') {
-      var route = tree[0].replace(/^[#/]/, '')
-    } else {
-      var rootArr = tree[0]
-    }
+},{}],22:[function(require,module,exports){
+module.exports = scrollToAnchor
 
-    var cb = (typeof tree[1] === 'function') ? tree[1] : null
-    var children = (Array.isArray(tree[1]))
-      ? tree[1]
-      : Array.isArray(tree[2]) ? tree[2] : null
-
-    if (rootArr) {
-      tree.forEach(function (node) {
-        walk(node, fullRoute)
-      })
-    }
-
-    if (cb) {
-      var innerRoute = route
-        ? fullRoute.concat(route).join('/')
-        : fullRoute.length ? fullRoute.join('/') : route
-
-      // if opts.thunk is false or only enabled for match, don't thunk
-      var handler = (opts.thunk === false || opts.thunk === 'match')
-        ? cb
-        : thunkify(cb)
-      router.on(innerRoute, handler)
-    }
-
-    if (Array.isArray(children)) {
-      walk(children, fullRoute.concat(route))
-    }
-  })(tree, [])
-
-  return match
-
-  // match a route on the router
-  //
-  // no thunking -> call route with all arguments
-  // thunking only for match -> call route with all arguments
-  // thunking and route is same -> call prev cb with new args
-  // thunking and route is diff -> create cb and call with new args
-  //
-  // (str, [any..]) -> any
-  function match (route, arg1, arg2, arg3, arg4, arg5) {
-    assert.equal(typeof route, 'string', 'sheet-router: route must be a string')
-
-    if (opts.thunk === false) {
-      return router(pathname(route, isLocalFile), arg1, arg2, arg3, arg4, arg5)
-    } else if (route === prevRoute) {
-      return prevCallback(arg1, arg2, arg3, arg4, arg5)
-    } else {
-      prevRoute = pathname(route, isLocalFile)
-      prevCallback = router(prevRoute)
-      return prevCallback(arg1, arg2, arg3, arg4, arg5)
-    }
+function scrollToAnchor (anchor, options) {
+  if (anchor) {
+    try {
+      var el = document.querySelector(anchor)
+      if (el) el.scrollIntoView(options)
+    } catch (e) {}
   }
 }
 
-// wrap a function in a function so it can be called at a later time
-// fn -> obj -> (any, any, any, any, any)
-function thunkify (cb) {
-  return function (params) {
-    return function (arg1, arg2, arg3, arg4, arg5) {
-      return cb(params, arg1, arg2, arg3, arg4, arg5)
-    }
-  }
-}
-
-},{"./_pathname":17,"assert":1,"wayfarer":27}],22:[function(require,module,exports){
-var window = require('global/window')
-
-var decodeURIComponent = window.decodeURIComponent
-var reg = new RegExp('([^?=&]+)(=([^&]*))?', 'g')
-
-module.exports = qs
-
-// decode a uri into a kv representation :: str -> obj
-function qs (uri) {
-  var obj = {}
-  uri.replace(/^.*\?/, '').replace(reg, map)
-  return obj
-
-  function map (a0, a1, a2, a3) {
-    obj[decodeURIComponent(a1)] = decodeURIComponent(a3)
-  }
-}
-
-},{"global/window":10}],23:[function(require,module,exports){
-const walk = require('wayfarer/walk')
-const assert = require('assert')
-
-module.exports = walkSheetRouter
-
-function walkSheetRouter (router, cb) {
-  assert.equal(typeof router, 'function', 'sheet-router/walk: router should be a function')
-  assert.equal(typeof cb, 'function', 'sheet-router/walk: cb should be a function')
-
-  router = router._router
-  return walk(router, cb)
-}
-
-},{"assert":1,"wayfarer/walk":29}],24:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -2856,14 +2275,14 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],25:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 module.exports = function isBuffer(arg) {
   return arg && typeof arg === 'object'
     && typeof arg.copy === 'function'
     && typeof arg.fill === 'function'
     && typeof arg.readUInt8 === 'function';
 }
-},{}],26:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -3453,9 +2872,9 @@ function hasOwnProperty(obj, prop) {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./support/isBuffer":25,"_process":6,"inherits":24}],27:[function(require,module,exports){
-const assert = require('assert')
-const trie = require('./trie')
+},{"./support/isBuffer":24,"_process":3,"inherits":23}],26:[function(require,module,exports){
+var assert = require('assert')
+var trie = require('./trie')
 
 module.exports = Wayfarer
 
@@ -3464,8 +2883,8 @@ module.exports = Wayfarer
 function Wayfarer (dft) {
   if (!(this instanceof Wayfarer)) return new Wayfarer(dft)
 
-  const _default = (dft || '').replace(/^\//, '')
-  const _trie = trie()
+  var _default = (dft || '').replace(/^\//, '')
+  var _trie = trie()
 
   emit._trie = _trie
   emit.emit = emit
@@ -3481,11 +2900,12 @@ function Wayfarer (dft) {
     assert.equal(typeof cb, 'function')
 
     route = route || '/'
+    cb.route = route
 
     if (cb && cb._wayfarer && cb._trie) {
       _trie.mount(route, cb._trie.trie)
     } else {
-      const node = _trie.create(route)
+      var node = _trie.create(route)
       node.cb = cb
     }
 
@@ -3496,31 +2916,33 @@ function Wayfarer (dft) {
   // (str, obj?) -> null
   function emit (route) {
     assert.notEqual(route, undefined, "'route' must be defined")
-    const args = new Array(arguments.length)
+    var args = new Array(arguments.length)
     for (var i = 1; i < args.length; i++) {
       args[i] = arguments[i]
     }
 
-    const node = _trie.match(route)
+    var node = _trie.match(route)
     if (node && node.cb) {
       args[0] = node.params
-      return node.cb.apply(null, args)
+      var cb = node.cb
+      return cb.apply(cb, args)
     }
 
-    const dft = _trie.match(_default)
+    var dft = _trie.match(_default)
     if (dft && dft.cb) {
       args[0] = dft.params
-      return dft.cb.apply(null, args)
+      var dftcb = dft.cb
+      return dftcb.apply(dftcb, args)
     }
 
     throw new Error("route '" + route + "' did not match")
   }
 }
 
-},{"./trie":28,"assert":1}],28:[function(require,module,exports){
-const mutate = require('xtend/mutable')
-const assert = require('assert')
-const xtend = require('xtend')
+},{"./trie":27,"assert":1}],27:[function(require,module,exports){
+var mutate = require('xtend/mutable')
+var assert = require('assert')
+var xtend = require('xtend')
 
 module.exports = Trie
 
@@ -3537,32 +2959,39 @@ function Trie () {
 Trie.prototype.create = function (route) {
   assert.equal(typeof route, 'string', 'route should be a string')
   // strip leading '/' and split routes
-  const routes = route.replace(/^\//, '').split('/')
-  return (function createNode (index, trie, routes) {
-    const route = routes[index]
+  var routes = route.replace(/^\//, '').split('/')
 
-    if (route === undefined) return trie
+  function createNode (index, trie) {
+    var thisRoute = (routes.hasOwnProperty(index) && routes[index])
+    if (thisRoute === false) return trie
 
     var node = null
-    if (/^:/.test(route)) {
+    if (/^:|^\*/.test(thisRoute)) {
       // if node is a name match, set name and append to ':' node
-      if (!trie.nodes['$$']) {
+      if (!trie.nodes.hasOwnProperty('$$')) {
         node = { nodes: {} }
         trie.nodes['$$'] = node
       } else {
         node = trie.nodes['$$']
       }
-      trie.name = route.replace(/^:/, '')
-    } else if (!trie.nodes[route]) {
+
+      if (thisRoute[0] === '*') {
+        trie.wildcard = true
+      }
+
+      trie.name = thisRoute.replace(/^:|^\*/, '')
+    } else if (!trie.nodes.hasOwnProperty(thisRoute)) {
       node = { nodes: {} }
-      trie.nodes[route] = node
+      trie.nodes[thisRoute] = node
     } else {
-      node = trie.nodes[route]
+      node = trie.nodes[thisRoute]
     }
 
     // we must recurse deeper
-    return createNode(index + 1, node, routes)
-  })(0, this.trie, routes)
+    return createNode(index + 1, node)
+  }
+
+  return createNode(0, this.trie)
 }
 
 // match a route on the trie
@@ -3571,27 +3000,42 @@ Trie.prototype.create = function (route) {
 Trie.prototype.match = function (route) {
   assert.equal(typeof route, 'string', 'route should be a string')
 
-  const routes = route.replace(/^\//, '').split('/')
-  const params = {}
+  var routes = route.replace(/^\//, '').split('/')
+  var params = {}
 
-  var node = (function search (index, trie) {
+  function search (index, trie) {
     // either there's no match, or we're done searching
     if (trie === undefined) return undefined
-    const route = routes[index]
-    if (route === undefined) return trie
+    var thisRoute = routes[index]
+    if (thisRoute === undefined) return trie
 
-    if (trie.nodes[route]) {
+    if (trie.nodes.hasOwnProperty(thisRoute)) {
       // match regular routes first
-      return search(index + 1, trie.nodes[route])
+      return search(index + 1, trie.nodes[thisRoute])
     } else if (trie.name) {
       // match named routes
-      params[trie.name] = decodeURIComponent(route)
+      try {
+        params[trie.name] = decodeURIComponent(thisRoute)
+      } catch (e) {
+        return search(index, undefined)
+      }
       return search(index + 1, trie.nodes['$$'])
+    } else if (trie.wildcard) {
+      // match wildcards
+      try {
+        params['wildcard'] = decodeURIComponent(routes.slice(index).join('/'))
+      } catch (e) {
+        return search(index, undefined)
+      }
+      // return early, or else search may keep recursing through the wildcard
+      return trie.nodes['$$']
     } else {
       // no matches found
       return search(index + 1)
     }
-  })(0, this.trie)
+  }
+
+  var node = search(0, this.trie)
 
   if (!node) return undefined
   node = xtend(node)
@@ -3605,7 +3049,7 @@ Trie.prototype.mount = function (route, trie) {
   assert.equal(typeof route, 'string', 'route should be a string')
   assert.equal(typeof trie, 'object', 'trie should be a object')
 
-  const split = route.replace(/^\//, '').split('/')
+  var split = route.replace(/^\//, '').split('/')
   var node = null
   var key = null
 
@@ -3613,8 +3057,8 @@ Trie.prototype.mount = function (route, trie) {
     key = split[0]
     node = this.create(key)
   } else {
-    const headArr = split.splice(0, split.length - 1)
-    const head = headArr.join('/')
+    var headArr = split.splice(0, split.length - 1)
+    var head = headArr.join('/')
     key = split[0]
     node = this.create(head)
   }
@@ -3634,40 +3078,7 @@ Trie.prototype.mount = function (route, trie) {
   }
 }
 
-},{"assert":1,"xtend":31,"xtend/mutable":32}],29:[function(require,module,exports){
-const assert = require('assert')
-
-module.exports = walk
-
-// walk a wayfarer trie
-// (obj, fn) -> null
-function walk (router, transform) {
-  assert.equal(typeof router, 'function', 'wayfarer.walk: router should be an function')
-  assert.equal(typeof transform, 'function', 'wayfarer.walk: transform should be a function')
-
-  const trie = router._trie
-  assert.equal(typeof trie, 'object', 'wayfarer.walk: trie should be an object')
-
-  // (str, obj) -> null
-  ;(function walk (route, trie) {
-    if (trie.cb) {
-      trie.cb = transform(route, trie.cb)
-    }
-
-    if (trie.nodes) {
-      const nodes = trie.nodes
-      Object.keys(nodes).forEach(function (key) {
-        const node = nodes[key]
-        const newRoute = (key === '$$')
-          ? route + '/:' + trie.name
-          : route + '/' + key
-        walk(newRoute, node)
-      })
-    }
-  })('', trie.trie)
-}
-
-},{"assert":1}],30:[function(require,module,exports){
+},{"assert":1,"xtend":29,"xtend/mutable":30}],28:[function(require,module,exports){
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
     // AMD. Register as an anonymous module unless amdModuleId is set
@@ -7487,7 +6898,7 @@ return Wad;
 
 }));
 
-},{}],31:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 module.exports = extend
 
 var hasOwnProperty = Object.prototype.hasOwnProperty;
@@ -7508,7 +6919,7 @@ function extend() {
     return target
 }
 
-},{}],32:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
 module.exports = extend
 
 var hasOwnProperty = Object.prototype.hasOwnProperty;
@@ -7527,98 +6938,16 @@ function extend(target) {
     return target
 }
 
-},{}],33:[function(require,module,exports){
-var bel = require('bel') // turns template tag into DOM elements
-var morphdom = require('morphdom') // efficiently diffs + morphs two DOM elements
-var defaultEvents = require('./update-events.js') // default events to be copied when dom elements update
-
-module.exports = bel
-
-// TODO move this + defaultEvents to a new module once we receive more feedback
-module.exports.update = function (fromNode, toNode, opts) {
-  if (!opts) opts = {}
-  if (opts.events !== false) {
-    if (!opts.onBeforeElUpdated) opts.onBeforeElUpdated = copier
-  }
-
-  return morphdom(fromNode, toNode, opts)
-
-  // morphdom only copies attributes. we decided we also wanted to copy events
-  // that can be set via attributes
-  function copier (f, t) {
-    // copy events:
-    var events = opts.events || defaultEvents
-    for (var i = 0; i < events.length; i++) {
-      var ev = events[i]
-      if (t[ev]) { // if new element has a whitelisted attribute
-        f[ev] = t[ev] // update existing element
-      } else if (f[ev]) { // if existing element has it and new one doesnt
-        f[ev] = undefined // remove it from existing element
-      }
-    }
-    var oldValue = f.value
-    var newValue = t.value
-    // copy values for form elements
-    if ((f.nodeName === 'INPUT' && f.type !== 'file') || f.nodeName === 'SELECT') {
-      if (!newValue) {
-        t.value = f.value
-      } else if (newValue !== oldValue) {
-        f.value = newValue
-      }
-    } else if (f.nodeName === 'TEXTAREA') {
-      if (t.getAttribute('value') === null) f.value = t.value
-    }
-  }
-}
-
-},{"./update-events.js":34,"bel":4,"morphdom":13}],34:[function(require,module,exports){
-module.exports = [
-  // attribute events (can be set with attributes)
-  'onclick',
-  'ondblclick',
-  'onmousedown',
-  'onmouseup',
-  'onmouseover',
-  'onmousemove',
-  'onmouseout',
-  'ondragstart',
-  'ondrag',
-  'ondragenter',
-  'ondragleave',
-  'ondragover',
-  'ondrop',
-  'ondragend',
-  'onkeydown',
-  'onkeypress',
-  'onkeyup',
-  'onunload',
-  'onabort',
-  'onerror',
-  'onresize',
-  'onscroll',
-  'onselect',
-  'onchange',
-  'onsubmit',
-  'onreset',
-  'onfocus',
-  'onblur',
-  'oninput',
-  // other common events
-  'oncontextmenu',
-  'onfocusin',
-  'onfocusout'
-]
-
-},{}],35:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 'use strict';
 
 var _choo = require('choo');
 
 var _choo2 = _interopRequireDefault(_choo);
 
-var _model = require('./model');
+var _state = require('./state');
 
-var _model2 = _interopRequireDefault(_model);
+var _state2 = _interopRequireDefault(_state);
 
 var _view = require('./view');
 
@@ -7628,202 +6957,120 @@ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { de
 
 var app = (0, _choo2.default)();
 
-app.model(_model2.default);
+app.use(_state2.default);
+app.route('/', _view2.default);
+app.mount('body');
 
-app.router([['/', _view2.default]]);
-
-var tree = app.start();
-document.body.appendChild(tree);
-
-},{"./model":37,"./view":41,"choo":8}],36:[function(require,module,exports){
-'use strict';
-
-Object.defineProperty(exports, "__esModule", {
-  value: true
-});
-exports.playSelect = playSelect;
-exports.playSeq = playSeq;
-exports.advanceGuess = advanceGuess;
-exports.newGame = newGame;
-exports.newMessage = newMessage;
-
-var _utils = require('../utils');
-
-function keyFrames(color) {
-  return [{ background: '#000', offset: 0 }, { background: color, offset: 0.5 }, { background: '#000', offset: 1 }];
-}
-
-function randomPraise() {
-  var praise = ["Great Job!", "Awesome!", "You're on Fire!", "Unstoppable!", "Fantastical!"];
-  var idx = Math.random() * 5 | 0;
-  return praise[idx];
-}
-
-function getQuads(state) {
-  return state.sequence.slice().map(function (i) {
-    return state.game.quadrants[i];
-  }).map(function (n, j) {
-    return { color: n.color, note: { pitch: n.note, wait: j * 0.5 + 1 } };
-  });
-}
-
-function endGame(send, done) {
-  send('game:winner', null, done);
-  send('game:changeMessage', { message: "You're a Winner!" }, done);
-  setTimeout(function () {
-    send('game:newGame', null, done);
-  }, 5000);
-}
-
-function advanceRound(send, done) {
-  send('game:changeStatus', { status: _utils.status.PLAYING }, done);
-  send('game:addToSeq', { next: Math.random() * 4 | 0 }, done);
-  send('game:resetCurrent', null, done);
-  send('game:playSeq', null, done);
-}
-
-function nextRound(state, send, done) {
-  if (state.game.sequence.length === 20) {
-    endGame(send, done);
-  } else {
-    advanceRound(send, done);
-  }
-}
-
-function playSelect(state, data, send, done) {
-  _utils.player.play(data.note);
-  setTimeout(function () {
-    data.el.animate(keyFrames(data.color), { duration: 500 });
-  }, data.note.wait * 1000);
-}
-
-function playSeq(state, data, send, done) {
-  getQuads(state).forEach(function (q) {
-    var el = document.querySelector('.' + q.color);
-    send('game:playSelect', { note: q.note, el: el, color: q.color }, done);
-  });
-  setTimeout(function () {
-    send('game:changeStatus', { status: _utils.status.WAITING }, done);
-  }, 500 * state.game.sequence.length + 1000);
-}
-
-function advanceGuess(state, data, send, done) {
-  if (state.game.sequence.length - state.game.current === 1) {
-    send('game:newMessage', randomPraise(), done);
-    setTimeout(function () {
-      nextRound(state, send, done);
-    }, 500);
-  } else {
-    send('game:incCurrent', null, done);
-  }
-}
-
-function newGame(state, data, send, done) {
-  send('game:init', null, done);
-  send('game:newMessage', "Good Luck!", done);
-  nextRound(state, send, done);
-}
-
-function newMessage(state, data, send, done) {
-  send('game:changeMessage', { message: data }, done);
-  setTimeout(function () {
-    send('game:changeMessage', { message: "" }, done);
-  }, 3000);
-}
-
-},{"../utils":39}],37:[function(require,module,exports){
+},{"./state":32,"./view":34,"choo":5}],32:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
 
-var _effects = require('./effects');
+var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
-var effects = _interopRequireWildcard(_effects);
+exports.default = gameStore;
 
-var _reducers = require('./reducers');
+var _utils = require('./utils');
 
-var reducers = _interopRequireWildcard(_reducers);
-
-var _utils = require('../utils');
-
-function _interopRequireWildcard(obj) { if (obj && obj.__esModule) { return obj; } else { var newObj = {}; if (obj != null) { for (var key in obj) { if (Object.prototype.hasOwnProperty.call(obj, key)) newObj[key] = obj[key]; } } newObj.default = obj; return newObj; } }
-
-var model = {
-  namespace: 'game',
-  state: {
-    quadrants: [{ color: 'green', note: 'A3' }, { color: 'red', note: 'E4' }, { color: 'yellow', note: 'C4' }, { color: 'blue', note: 'G4' }],
-    sequence: [],
-    current: 0,
-    status: _utils.status.STOPPED,
-    strict: false,
-    message: "Click Play to Start"
-  },
-  reducers: reducers,
-  effects: effects
+var reset = {
+  sequence: [],
+  current: 0,
+  strict: false,
+  message: "Good luck!"
 };
 
-exports.default = model;
+var initialState = {
+  quadrants: [{ color: 'green', note: 'A3' }, { color: 'red', note: 'E4' }, { color: 'yellow', note: 'C4' }, { color: 'blue', note: 'G4' }],
+  sequence: [],
+  current: 0,
+  status: _utils.status.STOPPED,
+  strict: false,
+  message: "Click Play to Start"
+};
 
-},{"../utils":39,"./effects":36,"./reducers":38}],38:[function(require,module,exports){
-"use strict";
+function gameStore(state, emitter) {
+  state = _extends({}, state, initialState);
 
-Object.defineProperty(exports, "__esModule", {
-  value: true
-});
-exports.addToSeq = addToSeq;
-exports.resetCurrent = resetCurrent;
-exports.changeStatus = changeStatus;
-exports.incCurrent = incCurrent;
-exports.switchStrict = switchStrict;
-exports.init = init;
-exports.changeMessage = changeMessage;
-exports.winner = winner;
+  emitter.on('toggleStrict', toggleStrict);
+  emitter.on('resetGame', resetGame);
+  emitter.on('newGame', newGame);
+  emitter.on('nextRound', nextRound);
+  emitter.on('playSeq', playSeq);
+  emitter.on('playSelect', playSelect);
 
-var _utils = require("../utils");
+  function toggleStrict() {
+    state = _extends({}, state, { strict: !state.strict });
+    emitter.emit('render');
+  }
 
-function addToSeq(state, data) {
-  var newA = state.game.sequence.slice();
-  newA.push(data.next);
-  return { sequence: newA };
+  function resetGame() {
+    state = _extends({}, state, reset);
+    emitter.emit('render');
+  }
+
+  function newGame() {
+    state = _extends({}, state, reset);
+    nextRound(state, emit);
+  }
+
+  function nextRound() {
+    state.sequence.length === 20 ? endGame() : advanceRound();
+  }
+
+  function playSeq() {
+    (0, _utils.getQuads)(state).forEach(function (q) {
+      var el = document.querySelector('.' + q.color);
+      playSelect({ note: q.note, el: el, color: q.color });
+    });
+    setTimeout(function () {
+      state = _extends({}, state, { status: _utils.status.WAITING });
+    }, 500 * state.game.sequence.length + 1000);
+  }
+
+  function advanceGuess(state, data, send, done) {
+
+    if (state.game.sequence.length - state.game.current === 1) {
+      state = _extends({}, state, { message: (0, _utils.randomPraise)() });
+      setTimeout(function () {
+        nextRound();
+      }, 500);
+    } else {
+      state = _extends({}, state, { current: current + 1 });
+    }
+  }
+
+  function advanceRound() {
+    state = _extends({}, state, {
+      status: _utils.status.PLAYING,
+      current: 0,
+      sequence: (0, _utils.newSeq)(state.sequence)
+    });
+    playSeq();
+  }
+
+  function endGame() {
+    state = _extends({}, state, { message: "You are a Winner!", status: _utils.status.STOPPED });
+    setTimeout(function () {
+      send('newGame', null, done);
+    }, 5000);
+    emitter.emit('render');
+  }
+
+  function playSelect(_ref) {
+    var el = _ref.el,
+        note = _ref.note,
+        color = _ref.color;
+
+    _utils.player.play(note);
+    setTimeout(function () {
+      el.animate((0, _utils.keyFrames)(color), { duration: 500 });
+    }, note.wait * 1000);
+  }
 }
 
-function resetCurrent(state, data) {
-  return { current: 0 };
-}
-
-function changeStatus(state, data) {
-  return { status: data.status };
-}
-
-function incCurrent(state, data) {
-  return { current: ++state.game.current };
-}
-
-function switchStrict(state, data) {
-  return { strict: !state.game.strict };
-}
-
-function init(state, data) {
-  return {
-    sequence: [],
-    strict: false
-  };
-}
-
-function changeMessage(state, data) {
-  return { message: data.message };
-}
-
-function winner(state, data) {
-  return {
-    message: "You are a Winner!",
-    status: _utils.status.STOPPED
-  };
-}
-
-},{"../utils":39}],39:[function(require,module,exports){
+},{"./utils":33}],33:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -7831,6 +7078,10 @@ Object.defineProperty(exports, "__esModule", {
 });
 exports.status = exports.player = undefined;
 exports.wrongGuess = wrongGuess;
+exports.addToSeq = addToSeq;
+exports.getQuads = getQuads;
+exports.randomPraise = randomPraise;
+exports.keyFrames = keyFrames;
 
 var _webAudioDaw = require('web-audio-daw');
 
@@ -7878,76 +7129,31 @@ var status = exports.status = {
   PLAYING: Symbol('playing')
 };
 
-},{"web-audio-daw":30}],40:[function(require,module,exports){
-'use strict';
-
-Object.defineProperty(exports, "__esModule", {
-  value: true
-});
-exports.makeGuess = makeGuess;
-exports.toggleStrict = toggleStrict;
-exports.resetGame = resetGame;
-
-var _utils = require('../utils');
-
-function correct(data, send) {
-  send('game:playSelect', data);
-  send('game:advanceGuess', null);
+function addToSeq(seq) {
+  var newSeq = seq.slice();
+  newSeq.push(Math.random() * 4 | 0);
+  return newSeq;
 }
 
-function incorrect(send) {
-  (0, _utils.wrongGuess)();
-  send('game:newMessage', "Nope, Listen!");
-  send('game:changeStatus', { status: _utils.status.PLAYING });
-  send('game:resetCurrent', null);
-  setTimeout(function () {
-    send('game:playSeq', null);
-  }, 1500);
+function getQuads(state) {
+  return state.sequence.slice().map(function (i) {
+    return state.game.quadrants[i];
+  }).map(function (n, j) {
+    return { color: n.color, note: { pitch: n.note, wait: j * 0.5 + 1 } };
+  });
 }
 
-function incorrectStrict(send) {
-  (0, _utils.wrongGuess)();
-  send('game:newMessage', "You're Wrong and You're Finished.");
-  send('game:changeStatus', { status: _utils.status.STOPPED });
-  setTimeout(function () {
-    send('game:newGame', null);
-  }, 3000);
+function randomPraise() {
+  var praise = ["Great Job!", "Awesome!", "You're on Fire!", "Unstoppable!", "Fantastical!"];
+  var idx = Math.random() * 5 | 0;
+  return praise[idx];
 }
 
-function makeGuess(state, send, e) {
-  e.preventDefault();
-  var classes = e.target.classList;
-  if (classes.contains("game")) {
-    var idx = state.game.sequence[state.game.current],
-        data = {
-      note: { pitch: state.game.quadrants[idx].note },
-      el: e.target,
-      color: state.game.quadrants[idx].color
-    };
-
-    if (classes.contains(state.game.quadrants[idx].color)) {
-      correct(data, send);
-    } else {
-      if (!state.game.strict) {
-        incorrect(send);
-      } else {
-        incorrectStrict(send);
-      }
-    }
-  }
+function keyFrames(color) {
+  return [{ background: '#000', offset: 0 }, { background: color, offset: 0.5 }, { background: '#000', offset: 1 }];
 }
 
-function toggleStrict(send, e) {
-  e.preventDefault();
-  send('game:switchStrict', null);
-}
-
-function resetGame(send, e) {
-  e.preventDefault();
-  send('game:newGame', null);
-}
-
-},{"../utils":39}],41:[function(require,module,exports){
+},{"web-audio-daw":28}],34:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -7965,40 +7171,83 @@ var _html = require('choo/html');
 
 var _html2 = _interopRequireDefault(_html);
 
-var _utils = require('../utils');
-
-var _handlers = require('./handlers');
+var _utils = require('./utils');
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 function _taggedTemplateLiteral(strings, raw) { return Object.freeze(Object.defineProperties(strings, { raw: { value: Object.freeze(raw) } })); }
 
+function correct(data, emit) {
+  emit('playSelect', data);
+  emit('advanceGuess');
+}
+
+function incorrect(emit) {
+  (0, _utils.wrongGuess)();
+  emit('newMessage', "Nope, Listen!");
+  emit('changeStatus', { status: _utils.status.PLAYING });
+  emit('resetCurrent');
+  setTimeout(function () {
+    emit('playSeq');
+  }, 1500);
+}
+
+function incorrectStrict(emit) {
+  (0, _utils.wrongGuess)();
+  emit('newMessage', "You're Wrong and You're Finished.");
+  emit('changeStatus', { status: _utils.status.STOPPED });
+  setTimeout(function () {
+    emit('newGame');
+  }, 3000);
+}
+
 function quad(quadrant) {
   return (0, _html2.default)(_templateObject, quadrant.color);
 }
 
-function ctrlBtns(state, send) {
+function ctrlBtns(state, emit) {
   return (0, _html2.default)(_templateObject2, function (e) {
-    return (0, _handlers.resetGame)(send, e);
-  }, state.game.status === _utils.status.STOPPED ? "fa-play" : "fa-refresh", state.game.strict ? "ctrl-btn-on" : "", function (e) {
-    return (0, _handlers.toggleStrict)(send, e);
+    return resetGame(e);
+  }, state.status === _utils.status.STOPPED ? "fa-play" : "fa-refresh", state.strict ? "ctrl-btn-on" : "", function (e) {
+    return toggleStrict(e);
   });
+
+  function toggleStrict(e) {
+    e.preventDefault();
+    emit('switchStrict');
+  }
+
+  function resetGame(e) {
+    e.preventDefault();
+    emit('newGame');
+  }
 }
 
-function control(state, send) {
-  return (0, _html2.default)(_templateObject3, state.game.sequence.length, state.game.message, ctrlBtns(state, send));
+function control(state, emit) {
+  return (0, _html2.default)(_templateObject3, state.sequence.length, state.message, ctrlBtns(state, emit));
 }
 
-function container(state, send, content) {
+function container(state, emit, content) {
   return (0, _html2.default)(_templateObject4, function (e) {
-    return (0, _handlers.makeGuess)(state, send, e);
+    return makeGuess(e);
   }, content);
+
+  function makeGuess(e) {
+    e.preventDefault();
+    var idx = state.sequence[state.current];
+    var data = {
+      note: { pitch: state.quadrants[idx].note },
+      el: e.target,
+      color: state.quadrants[idx].color
+    };
+    e.target.classList.contains(state.quadrants[idx].color) ? correct(data, emit) : !state.strict ? incorrect(emit) : incorrectStrict(emit);
+  }
 }
 
-function view(state, prev, send) {
-  var content = state.game.quadrants.map(quad);
-  content.push(control(state, send));
-  return container(state, send, content);
+function view(state, emit) {
+  var content = state.quadrants.map(quad);
+  content.push(control(state, emit));
+  return container(state, emit, content);
 }
 
-},{"../utils":39,"./handlers":40,"choo/html":7}]},{},[35]);
+},{"./utils":33,"choo/html":4}]},{},[31]);

@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "budo src/index.js:dist/app.js -ol -- ",
+    "start": "budo src/index.js:dist/app.js -ol",
     "build": "browserify src/index.js -o dist/app.js",
     "deploy": "npm run build && surge"
   },
@@ -18,13 +18,15 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "choo": "^4.1.0",
+    "choo": "^6.0.1",
     "web-audio-daw": "^2.3.1"
   },
   "devDependencies": {
-    "babel-preset-es2015": "^6.22.0",
+    "babel-plugin-transform-object-rest-spread": "^6.26.0",
+    "babel-preset-env": "^1.6.0",
     "babelify": "^7.3.0",
     "browserify": "^14.1.0",
+    "budo": "^10.0.4",
     "choo-log": "^3.0.1",
     "surge": "^0.18.0"
   }
